@@ -21,6 +21,9 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.ZitiManagementGRPCTarget != "ziti-management:50051" {
 		t.Fatalf("expected ziti management target %q, got %q", "ziti-management:50051", cfg.ZitiManagementGRPCTarget)
 	}
+	if cfg.IdentityGRPCTarget != "identity:50051" {
+		t.Fatalf("expected identity target %q, got %q", "identity:50051", cfg.IdentityGRPCTarget)
+	}
 	if cfg.GroupsGRPCTarget != "groups:50051" {
 		t.Fatalf("expected groups target %q, got %q", "groups:50051", cfg.GroupsGRPCTarget)
 	}
@@ -47,6 +50,7 @@ func TestFromEnvDependencyClientsEnabled(t *testing.T) {
 	t.Setenv("DEPENDENCY_CLIENTS_ENABLED", "true")
 	t.Setenv("AUTHORIZATION_GRPC_TARGET", "authorization.internal:50051")
 	t.Setenv("ZITI_MANAGEMENT_GRPC_TARGET", "ziti-management.internal:50051")
+	t.Setenv("IDENTITY_GRPC_TARGET", "identity.internal:50051")
 	t.Setenv("GROUPS_GRPC_TARGET", "groups.internal:50051")
 	t.Setenv("NOTIFICATIONS_GRPC_TARGET", "notifications.internal:50051")
 	t.Setenv("NATS_URL", "nats://nats:4222")
@@ -82,6 +86,7 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("DEPENDENCY_CLIENTS_ENABLED", "")
 	t.Setenv("AUTHORIZATION_GRPC_TARGET", "")
 	t.Setenv("ZITI_MANAGEMENT_GRPC_TARGET", "")
+	t.Setenv("IDENTITY_GRPC_TARGET", "")
 	t.Setenv("GROUPS_GRPC_TARGET", "")
 	t.Setenv("NOTIFICATIONS_GRPC_TARGET", "")
 	t.Setenv("NATS_URL", "")
