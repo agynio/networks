@@ -267,6 +267,14 @@ func (f *fakeStore) mustCreatePrivateResource(network store.Network) store.Priva
 	return resource
 }
 
+func (f *fakeStore) mustCreateTunnelCredential(network store.Network) store.TunnelCredential {
+	credential, err := f.CreateTunnelCredential(context.Background(), store.CreateTunnelCredentialInput{ID: uuid.New(), NetworkID: network.Meta.ID})
+	if err != nil {
+		panic(err)
+	}
+	return credential
+}
+
 func fakeMeta(id uuid.UUID) store.EntityMeta {
 	now := time.Now().UTC()
 	return store.EntityMeta{ID: id, CreatedAt: now, UpdatedAt: now}
@@ -370,7 +378,10 @@ func (f *fakeStore) GetPrivateResourceAccess(_ context.Context, id uuid.UUID) (s
 func (f *fakeStore) ListPrivateResourceAccess(context.Context, store.ListPrivateResourceAccessFilter, int32, *store.PageCursor) ([]store.PrivateResourceAccess, *store.PageCursor, error) {
 	return nil, nil, nil
 }
-func (f *fakeStore) DeletePrivateResourceAccess(context.Context, uuid.UUID) error { return nil }
+func (f *fakeStore) DeletePrivateResourceAccess(_ context.Context, id uuid.UUID) error {
+	delete(f.accesses, id)
+	return nil
+}
 
 func (f *fakeStore) UpdateNetworkProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiBindPolicyID string) (store.Network, error) {
 	network := f.networks[id]
@@ -407,3 +418,55 @@ func (f *fakeStore) UpdatePrivateResourceAccessProvisioning(_ context.Context, i
 }
 
 var _ Store = (*fakeStore)(nil)
+
+func (f *fakeStore) ListAllNetworks(context.Context) ([]store.Network, error) {
+	values := make([]store.Network, 0, len(f.networks))
+	for _, value := range f.networks {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllTunnelCredentials(context.Context) ([]store.TunnelCredential, error) {
+	values := make([]store.TunnelCredential, 0, len(f.credentials))
+	for _, value := range f.credentials {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) UpdateTunnelCredentialLiveness(_ context.Context, input store.UpdateTunnelCredentialLivenessInput) (store.TunnelCredential, error) {
+	credential := f.credentials[input.ID]
+	credential.EnrollmentState = input.EnrollmentState
+	credential.Connectivity = input.Connectivity
+	credential.EnrolledAt = input.EnrolledAt
+	credential.LastSeenAt = input.LastSeenAt
+	f.credentials[input.ID] = credential
+	return credential, nil
+}
+
+func (f *fakeStore) ListAllPrivateResources(context.Context) ([]store.PrivateResource, error) {
+	values := make([]store.PrivateResource, 0, len(f.resources))
+	for _, value := range f.resources {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllPrivateResourceAccess(context.Context) ([]store.PrivateResourceAccess, error) {
+	values := make([]store.PrivateResourceAccess, 0, len(f.accesses))
+	for _, value := range f.accesses {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListPrivateResourceAccessByGroupID(_ context.Context, groupID uuid.UUID) ([]store.PrivateResourceAccess, error) {
+	values := []store.PrivateResourceAccess{}
+	for _, value := range f.accesses {
+		if value.PrincipalType == store.PrincipalTypeGroup && value.PrincipalID == groupID {
+			values = append(values, value)
+		}
+	}
+	return values, nil
+}

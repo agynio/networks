@@ -11,6 +11,7 @@ import (
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
 	networksv1 "github.com/agynio/networks/.gen/go/agynio/api/networks/v1"
+	notificationsv1 "github.com/agynio/networks/.gen/go/agynio/api/notifications/v1"
 	zitimgmtv1 "github.com/agynio/networks/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/networks/internal/store"
 	"github.com/google/uuid"
@@ -24,25 +25,31 @@ import (
 type Store interface {
 	UpdateNetworkProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string) (store.Network, error)
 	UpdateTunnelCredentialProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string, bool, *time.Time) (store.TunnelCredential, error)
+	UpdateTunnelCredentialLiveness(context.Context, store.UpdateTunnelCredentialLivenessInput) (store.TunnelCredential, error)
 	UpdatePrivateResourceProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string) (store.PrivateResource, error)
 	UpdatePrivateResourceAccessProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string) (store.PrivateResourceAccess, error)
 	CreateNetwork(context.Context, store.CreateNetworkInput) (store.Network, error)
 	GetNetwork(context.Context, uuid.UUID) (store.Network, error)
 	ListNetworks(context.Context, uuid.UUID, int32, *store.PageCursor) ([]store.Network, *store.PageCursor, error)
+	ListAllNetworks(context.Context) ([]store.Network, error)
 	UpdateNetwork(context.Context, store.UpdateNetworkInput) (store.Network, error)
 	DeleteNetwork(context.Context, uuid.UUID) error
 	CreateTunnelCredential(context.Context, store.CreateTunnelCredentialInput) (store.TunnelCredential, error)
 	GetTunnelCredential(context.Context, uuid.UUID) (store.TunnelCredential, error)
 	ListTunnelCredentials(context.Context, uuid.UUID, int32, *store.PageCursor) ([]store.TunnelCredential, *store.PageCursor, error)
+	ListAllTunnelCredentials(context.Context) ([]store.TunnelCredential, error)
 	DeleteTunnelCredential(context.Context, uuid.UUID) error
 	CreatePrivateResource(context.Context, store.CreatePrivateResourceInput) (store.PrivateResource, error)
 	GetPrivateResource(context.Context, uuid.UUID) (store.PrivateResource, error)
 	ListPrivateResources(context.Context, store.ListPrivateResourcesFilter, int32, *store.PageCursor) ([]store.PrivateResource, *store.PageCursor, error)
+	ListAllPrivateResources(context.Context) ([]store.PrivateResource, error)
 	UpdatePrivateResource(context.Context, store.UpdatePrivateResourceInput) (store.PrivateResource, error)
 	DeletePrivateResource(context.Context, uuid.UUID) error
 	CreatePrivateResourceAccess(context.Context, store.CreatePrivateResourceAccessInput) (store.PrivateResourceAccess, error)
 	GetPrivateResourceAccess(context.Context, uuid.UUID) (store.PrivateResourceAccess, error)
 	ListPrivateResourceAccess(context.Context, store.ListPrivateResourceAccessFilter, int32, *store.PageCursor) ([]store.PrivateResourceAccess, *store.PageCursor, error)
+	ListAllPrivateResourceAccess(context.Context) ([]store.PrivateResourceAccess, error)
+	ListPrivateResourceAccessByGroupID(context.Context, uuid.UUID) ([]store.PrivateResourceAccess, error)
 	DeletePrivateResourceAccess(context.Context, uuid.UUID) error
 }
 
@@ -58,18 +65,33 @@ type groupsClient interface {
 	GetGroup(context.Context, *groupsv1.GetGroupRequest, ...grpc.CallOption) (*groupsv1.GetGroupResponse, error)
 }
 
+type notificationsClient interface {
+	Publish(context.Context, *notificationsv1.PublishRequest, ...grpc.CallOption) (*notificationsv1.PublishResponse, error)
+}
+
+type eventPublisher interface {
+	Publish(context.Context, string, string, []byte) error
+}
+
 type Server struct {
 	store                Store
 	authorizationClient  authorizationClient
 	identityClient       identityClient
 	groupsClient         groupsClient
 	zitiManagementClient zitiManagementClient
+	notificationsClient  notificationsClient
+	eventPublisher       eventPublisher
+	now                  func() time.Time
 }
 
 func New(store Store) *Server { return NewWithClients(store, nil, nil, nil, nil) }
 
 func NewWithClients(store Store, authorizationClient authorizationClient, identityClient identityClient, groupsClient groupsClient, zitiManagementClient zitiManagementClient) *Server {
-	return &Server{store: store, authorizationClient: authorizationClient, identityClient: identityClient, groupsClient: groupsClient, zitiManagementClient: zitiManagementClient}
+	return NewWithDependencies(store, authorizationClient, identityClient, groupsClient, zitiManagementClient, nil, nil)
+}
+
+func NewWithDependencies(store Store, authorizationClient authorizationClient, identityClient identityClient, groupsClient groupsClient, zitiManagementClient zitiManagementClient, notificationsClient notificationsClient, eventPublisher eventPublisher) *Server {
+	return &Server{store: store, authorizationClient: authorizationClient, identityClient: identityClient, groupsClient: groupsClient, zitiManagementClient: zitiManagementClient, notificationsClient: notificationsClient, eventPublisher: eventPublisher, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Server) CreateNetwork(ctx context.Context, request *networksv1.CreateNetworkRequest) (*networksv1.CreateNetworkResponse, error) {
@@ -214,17 +236,16 @@ func (s *Server) CreateTunnelCredential(ctx context.Context, request *networksv1
 		return nil, err
 	}
 	credentialID := uuid.New()
-	credential, err := s.store.CreateTunnelCredential(ctx, store.CreateTunnelCredentialInput{ID: credentialID, NetworkID: networkID})
+	zitiIdentityID, enrollmentJWT, enrollmentResponse, err := s.provisionTunnelIdentity(ctx, networkID, credentialID)
 	if err != nil {
-		return nil, toStatus(err)
+		return nil, status.Errorf(codes.Unavailable, "create OpenZiti tunnel identity: %v", err)
 	}
-	provisioningState, zitiIdentityID, enrollmentJWT, enrollmentResponse := s.provisionTunnelIdentity(ctx, networkID, credentialID)
 	var expiresAt *time.Time
 	if enrollmentResponse != nil && enrollmentResponse.GetEnrollmentJwtExpiresAt() != nil {
 		value := enrollmentResponse.GetEnrollmentJwtExpiresAt().AsTime()
 		expiresAt = &value
 	}
-	credential, err = s.store.UpdateTunnelCredentialProvisioning(ctx, credentialID, provisioningState, zitiIdentityID, enrollmentJWT != "", expiresAt)
+	credential, err := s.store.CreateTunnelCredential(ctx, store.CreateTunnelCredentialInput{ID: credentialID, NetworkID: networkID, OpenZitiIdentityID: zitiIdentityID, EnrollmentJWTRevealed: enrollmentJWT != "", EnrollmentJWTExpiresAt: expiresAt, ProvisioningState: store.ProvisioningStateActive})
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -492,6 +513,7 @@ func (s *Server) CreatePrivateResourceAccess(ctx context.Context, request *netwo
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishAccessGranted(ctx, access)
 	return &networksv1.CreatePrivateResourceAccessResponse{PrivateResourceAccess: convertPrivateResourceAccess(access)}, nil
 }
 
@@ -516,6 +538,7 @@ func (s *Server) DeletePrivateResourceAccess(ctx context.Context, request *netwo
 	if err := s.store.DeletePrivateResourceAccess(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishAccessRevoked(ctx, access)
 	return &networksv1.DeletePrivateResourceAccessResponse{}, nil
 }
 

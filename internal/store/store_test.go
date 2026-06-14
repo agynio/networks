@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/agynio/networks/internal/db"
 	"github.com/google/uuid"
@@ -164,4 +165,68 @@ func TestStoreUpdatePrivateResourceRewritesInterceptUniqueness(t *testing.T) {
 		InterceptPorts: []int32{15432},
 	})
 	require.NoError(t, err)
+}
+
+func TestStoreProvisioningLivenessAndGroupGrantQueries(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	orgID := uuid.New()
+	networkID := uuid.New()
+	resourceID := uuid.New()
+	credentialID := uuid.New()
+	groupID := uuid.New()
+	accessID := uuid.New()
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	enrolledAt := time.Now().UTC()
+	lastSeenAt := enrolledAt.Add(time.Minute)
+
+	_, err := store.CreateNetwork(ctx, CreateNetworkInput{ID: networkID, OrganizationID: orgID, Name: "corp"})
+	require.NoError(t, err)
+	network, err := store.UpdateNetworkProvisioning(ctx, networkID, ProvisioningStateFailed, "bind-policy")
+	require.NoError(t, err)
+	require.Equal(t, ProvisioningStateFailed, network.ProvisioningState)
+	require.Equal(t, "bind-policy", network.OpenZitiBindPolicyID)
+
+	_, err = store.CreateTunnelCredential(ctx, CreateTunnelCredentialInput{ID: credentialID, NetworkID: networkID})
+	require.NoError(t, err)
+	credential, err := store.UpdateTunnelCredentialProvisioning(ctx, credentialID, ProvisioningStateActive, "identity", true, &expiresAt)
+	require.NoError(t, err)
+	require.Equal(t, "identity", credential.OpenZitiIdentityID)
+	require.True(t, credential.EnrollmentJWTRevealed)
+	credential, err = store.UpdateTunnelCredentialLiveness(ctx, UpdateTunnelCredentialLivenessInput{ID: credentialID, EnrollmentState: TunnelEnrollmentStateEnrolled, Connectivity: TunnelConnectivityOnline, EnrolledAt: &enrolledAt, LastSeenAt: &lastSeenAt})
+	require.NoError(t, err)
+	require.Equal(t, TunnelEnrollmentStateEnrolled, credential.EnrollmentState)
+	require.Equal(t, TunnelConnectivityOnline, credential.Connectivity)
+
+	_, err = store.CreatePrivateResource(ctx, CreatePrivateResourceInput{ID: resourceID, OrganizationID: orgID, NetworkID: networkID, Name: "postgres", Protocol: PrivateResourceProtocolTCP, TargetHost: "postgres.internal", TargetPorts: []int32{5432}, InterceptHost: "postgres.private.example.com", InterceptPorts: []int32{15432}})
+	require.NoError(t, err)
+	resource, err := store.UpdatePrivateResourceProvisioning(ctx, resourceID, ProvisioningStateFailed, "service")
+	require.NoError(t, err)
+	require.Equal(t, "service", resource.OpenZitiServiceID)
+
+	_, err = store.CreatePrivateResourceAccess(ctx, CreatePrivateResourceAccessInput{ID: accessID, PrivateResourceID: resourceID, PrincipalType: PrincipalTypeGroup, PrincipalID: groupID})
+	require.NoError(t, err)
+	access, err := store.UpdatePrivateResourceAccessProvisioning(ctx, accessID, ProvisioningStateFailed, "dial-policy")
+	require.NoError(t, err)
+	require.Equal(t, "dial-policy", access.OpenZitiDialPolicyID)
+
+	networks, err := store.ListAllNetworks(ctx)
+	require.NoError(t, err)
+	require.Len(t, networks, 1)
+	credentials, err := store.ListAllTunnelCredentials(ctx)
+	require.NoError(t, err)
+	require.Len(t, credentials, 1)
+	resources, err := store.ListAllPrivateResources(ctx)
+	require.NoError(t, err)
+	require.Len(t, resources, 1)
+	accesses, err := store.ListAllPrivateResourceAccess(ctx)
+	require.NoError(t, err)
+	require.Len(t, accesses, 1)
+	groupAccesses, err := store.ListPrivateResourceAccessByGroupID(ctx, groupID)
+	require.NoError(t, err)
+	require.Len(t, groupAccesses, 1)
+	require.NoError(t, store.DeletePrivateResourceAccess(ctx, accessID))
+	groupAccesses, err = store.ListPrivateResourceAccessByGroupID(ctx, groupID)
+	require.NoError(t, err)
+	require.Empty(t, groupAccesses)
 }

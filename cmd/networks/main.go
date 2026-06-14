@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
@@ -64,6 +65,9 @@ func run() error {
 		identityClient      identityv1.IdentityServiceClient
 		groupsClient        groupsv1.GroupsServiceClient
 		zitiClient          zitimgmtv1.ZitiManagementServiceClient
+		notificationsClient notificationsv1.NotificationsServiceClient
+		eventPublisher      server.EventPublisher
+		natsConn            server.NATSConn
 	)
 	if cfg.DependencyClientsEnabled {
 		authConn, err := grpc.NewClient(cfg.AuthorizationGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -99,15 +103,42 @@ func run() error {
 			return fmt.Errorf("connect to notifications: %w", err)
 		}
 		defer closeConn(notificationsConn)
-		_ = notificationsv1.NewNotificationsServiceClient(notificationsConn)
+		notificationsClient = notificationsv1.NewNotificationsServiceClient(notificationsConn)
 
 		if cfg.NATSURL != "" {
-			log.Printf("NetworksService NATS configured at %s; event publisher wiring is deferred to provisioning slices", cfg.NATSURL)
+			conn, err := server.ConnectNATS(cfg.NATSURL)
+			if err != nil {
+				return fmt.Errorf("connect to nats: %w", err)
+			}
+			natsConn = conn
+			defer natsConn.Close()
+			eventPublisher, err = server.NewNATSPublisher(natsConn)
+			if err != nil {
+				return fmt.Errorf("create nats publisher: %w", err)
+			}
 		}
 	}
 
 	grpcServer := grpc.NewServer()
-	networksv1.RegisterNetworksServiceServer(grpcServer, server.NewWithClients(store.New(pool), authorizationClient, identityClient, groupsClient, zitiClient))
+	networksStore := store.New(pool)
+	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher)
+	if err := networksServer.Reconcile(ctx); err != nil {
+		return fmt.Errorf("initial reconciliation: %w", err)
+	}
+	if cfg.DependencyClientsEnabled && cfg.NATSURL != "" {
+		networksSubscription, err := networksServer.SubscribeGroupDeleted(ctx, natsConn)
+		if err != nil {
+			return fmt.Errorf("subscribe group deleted events: %w", err)
+		}
+		defer func() {
+			if err := networksSubscription.Unsubscribe(); err != nil {
+				log.Printf("unsubscribe group deleted consumer: %v", err)
+			}
+		}()
+	}
+	startPeriodic(ctx, cfg.ReconciliationInterval, func() { _ = networksServer.Reconcile(context.Background()) })
+	startPeriodic(ctx, cfg.TunnelLivenessInterval, func() { _ = networksServer.PollTunnelLiveness(context.Background()) })
+	networksv1.RegisterNetworksServiceServer(grpcServer, networksServer)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
@@ -127,4 +158,22 @@ func run() error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+func startPeriodic(ctx context.Context, interval time.Duration, run func()) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
 }

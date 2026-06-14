@@ -26,6 +26,11 @@ type zitiManagementClient interface {
 	DeleteServicePolicy(context.Context, *zitimgmtv1.DeleteServicePolicyRequest, ...grpc.CallOption) (*zitimgmtv1.DeleteServicePolicyResponse, error)
 	CreateTunnelIdentity(context.Context, *zitimgmtv1.CreateTunnelIdentityRequest, ...grpc.CallOption) (*zitimgmtv1.CreateTunnelIdentityResponse, error)
 	DeleteTunnelIdentity(context.Context, *zitimgmtv1.DeleteTunnelIdentityRequest, ...grpc.CallOption) (*zitimgmtv1.DeleteTunnelIdentityResponse, error)
+	PatchIdentityRoleAttributes(context.Context, *zitimgmtv1.PatchIdentityRoleAttributesRequest, ...grpc.CallOption) (*zitimgmtv1.PatchIdentityRoleAttributesResponse, error)
+	GetIdentityLiveness(context.Context, *zitimgmtv1.GetIdentityLivenessRequest, ...grpc.CallOption) (*zitimgmtv1.GetIdentityLivenessResponse, error)
+	ListServicesByTag(context.Context, *zitimgmtv1.ListServicesByTagRequest, ...grpc.CallOption) (*zitimgmtv1.ListServicesByTagResponse, error)
+	ListIdentitiesByTag(context.Context, *zitimgmtv1.ListIdentitiesByTagRequest, ...grpc.CallOption) (*zitimgmtv1.ListIdentitiesByTagResponse, error)
+	ListServicePoliciesByTag(context.Context, *zitimgmtv1.ListServicePoliciesByTagRequest, ...grpc.CallOption) (*zitimgmtv1.ListServicePoliciesByTagResponse, error)
 }
 
 type networkProvisioningResult struct {
@@ -61,9 +66,9 @@ func (s *Server) provisionNetworkBindPolicy(ctx context.Context, networkID uuid.
 	return networkProvisioningResult{State: store.ProvisioningStateActive, BindPolicyID: response.GetZitiServicePolicyId()}
 }
 
-func (s *Server) provisionTunnelIdentity(ctx context.Context, networkID uuid.UUID, credentialID uuid.UUID) (store.ProvisioningState, string, string, *zitimgmtv1.CreateTunnelIdentityResponse) {
+func (s *Server) provisionTunnelIdentity(ctx context.Context, networkID uuid.UUID, credentialID uuid.UUID) (string, string, *zitimgmtv1.CreateTunnelIdentityResponse, error) {
 	if s.zitiManagementClient == nil {
-		return store.ProvisioningStateActive, "", "", nil
+		return "", "", nil, nil
 	}
 	response, err := s.zitiManagementClient.CreateTunnelIdentity(ctx, &zitimgmtv1.CreateTunnelIdentityRequest{
 		NetworkId:          networkID.String(),
@@ -71,9 +76,17 @@ func (s *Server) provisionTunnelIdentity(ctx context.Context, networkID uuid.UUI
 		Tags:               tunnelCredentialTags(networkID, credentialID),
 	})
 	if err != nil {
-		return store.ProvisioningStateFailed, "", "", nil
+		return "", "", nil, err
 	}
-	return store.ProvisioningStateActive, response.GetZitiIdentityId(), response.GetEnrollmentJwt(), response
+	_, err = s.zitiManagementClient.PatchIdentityRoleAttributes(ctx, &zitimgmtv1.PatchIdentityRoleAttributesRequest{
+		ZitiIdentityId: response.GetZitiIdentityId(),
+		Add:            []string{tunnelRoleAttribute(), networkRoleAttribute(networkID)},
+	})
+	if err != nil {
+		_ = ignoreMissing(s.zitiManagementClient.DeleteTunnelIdentity(ctx, &zitimgmtv1.DeleteTunnelIdentityRequest{ZitiIdentityId: response.GetZitiIdentityId()}))
+		return "", "", nil, err
+	}
+	return response.GetZitiIdentityId(), response.GetEnrollmentJwt(), response, nil
 }
 
 func (s *Server) provisionPrivateResource(ctx context.Context, resource store.PrivateResource) privateResourceProvisioningResult {
@@ -222,6 +235,8 @@ func privateResourceServiceName(resourceID uuid.UUID) string {
 func networkRoleAttribute(networkID uuid.UUID) string {
 	return fmt.Sprintf("network-%s", networkID)
 }
+
+func tunnelRoleAttribute() string { return "tunnels" }
 
 func networkResourcesRoleAttribute(networkID uuid.UUID) string {
 	return fmt.Sprintf("network-resources-%s", networkID)

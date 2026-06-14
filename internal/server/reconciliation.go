@@ -1,0 +1,200 @@
+package server
+
+import (
+	"context"
+	"log"
+
+	zitimgmtv1 "github.com/agynio/networks/.gen/go/agynio/api/ziti_management/v1"
+	"github.com/agynio/networks/internal/store"
+)
+
+func (s *Server) Reconcile(ctx context.Context) error {
+	if s.zitiManagementClient == nil {
+		return nil
+	}
+	networks, err := s.store.ListAllNetworks(ctx)
+	if err != nil {
+		return err
+	}
+	resources, err := s.store.ListAllPrivateResources(ctx)
+	if err != nil {
+		return err
+	}
+	accesses, err := s.store.ListAllPrivateResourceAccess(ctx)
+	if err != nil {
+		return err
+	}
+	credentials, err := s.store.ListAllTunnelCredentials(ctx)
+	if err != nil {
+		return err
+	}
+	for _, network := range networks {
+		s.reconcileNetwork(ctx, network)
+	}
+	for _, resource := range resources {
+		s.reconcilePrivateResource(ctx, resource)
+	}
+	for _, access := range accesses {
+		s.reconcilePrivateResourceAccess(ctx, access)
+	}
+	s.cleanupOrphanServices(ctx, resources)
+	s.cleanupOrphanServicePolicies(ctx, networks, accesses)
+	s.cleanupOrphanIdentities(ctx, credentials)
+	return nil
+}
+
+func (s *Server) reconcileNetwork(ctx context.Context, network store.Network) {
+	if network.OpenZitiBindPolicyID != "" && network.ProvisioningState == store.ProvisioningStateActive {
+		return
+	}
+	provisioning := s.provisionNetworkBindPolicy(ctx, network.Meta.ID)
+	if _, err := s.store.UpdateNetworkProvisioning(ctx, network.Meta.ID, provisioning.State, provisioning.BindPolicyID); err != nil {
+		log.Printf("reconcile network %s failed: %v", network.Meta.ID, err)
+	}
+}
+
+func (s *Server) reconcilePrivateResource(ctx context.Context, resource store.PrivateResource) {
+	if resource.OpenZitiServiceID != "" && resource.ProvisioningState == store.ProvisioningStateActive {
+		return
+	}
+	provisioning := s.provisionPrivateResource(ctx, resource)
+	if _, err := s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioning.State, provisioning.ServiceID); err != nil {
+		log.Printf("reconcile private resource %s failed: %v", resource.Meta.ID, err)
+	}
+}
+
+func (s *Server) reconcilePrivateResourceAccess(ctx context.Context, access store.PrivateResourceAccess) {
+	if access.OpenZitiDialPolicyID != "" && access.ProvisioningState == store.ProvisioningStateActive {
+		return
+	}
+	provisioning := s.provisionPrivateResourceAccess(ctx, access)
+	if _, err := s.store.UpdatePrivateResourceAccessProvisioning(ctx, access.Meta.ID, provisioning.State, provisioning.DialPolicyID); err != nil {
+		log.Printf("reconcile private resource access %s failed: %v", access.Meta.ID, err)
+	}
+}
+
+func (s *Server) cleanupOrphanServices(ctx context.Context, resources []store.PrivateResource) {
+	managed := map[string]struct{}{}
+	for _, resource := range resources {
+		if resource.OpenZitiServiceID != "" {
+			managed[resource.OpenZitiServiceID] = struct{}{}
+		}
+	}
+	services, err := s.listManagedServices(ctx)
+	if err != nil {
+		log.Printf("list managed OpenZiti services failed: %v", err)
+		return
+	}
+	for _, service := range services {
+		if _, ok := managed[service.GetZitiServiceId()]; ok {
+			continue
+		}
+		_, err := s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: service.GetZitiServiceId()})
+		if err := ignoreMissing(nil, err); err != nil {
+			log.Printf("delete orphan OpenZiti service %s failed: %v", service.GetZitiServiceId(), err)
+		}
+	}
+}
+
+func (s *Server) cleanupOrphanServicePolicies(ctx context.Context, networks []store.Network, accesses []store.PrivateResourceAccess) {
+	managed := map[string]struct{}{}
+	for _, network := range networks {
+		if network.OpenZitiBindPolicyID != "" {
+			managed[network.OpenZitiBindPolicyID] = struct{}{}
+		}
+	}
+	for _, access := range accesses {
+		if access.OpenZitiDialPolicyID != "" {
+			managed[access.OpenZitiDialPolicyID] = struct{}{}
+		}
+	}
+	policies, err := s.listManagedServicePolicies(ctx)
+	if err != nil {
+		log.Printf("list managed OpenZiti service policies failed: %v", err)
+		return
+	}
+	for _, policy := range policies {
+		if _, ok := managed[policy.GetZitiServicePolicyId()]; ok {
+			continue
+		}
+		_, err := s.zitiManagementClient.DeleteServicePolicy(ctx, &zitimgmtv1.DeleteServicePolicyRequest{ZitiServicePolicyId: policy.GetZitiServicePolicyId()})
+		if err := ignoreMissing(nil, err); err != nil {
+			log.Printf("delete orphan OpenZiti service policy %s failed: %v", policy.GetZitiServicePolicyId(), err)
+		}
+	}
+}
+
+func (s *Server) cleanupOrphanIdentities(ctx context.Context, credentials []store.TunnelCredential) {
+	managed := map[string]struct{}{}
+	for _, credential := range credentials {
+		if credential.OpenZitiIdentityID != "" {
+			managed[credential.OpenZitiIdentityID] = struct{}{}
+		}
+	}
+	identities, err := s.listManagedIdentities(ctx)
+	if err != nil {
+		log.Printf("list managed OpenZiti identities failed: %v", err)
+		return
+	}
+	for _, identity := range identities {
+		if _, ok := managed[identity.GetZitiIdentityId()]; ok {
+			continue
+		}
+		_, err := s.zitiManagementClient.DeleteTunnelIdentity(ctx, &zitimgmtv1.DeleteTunnelIdentityRequest{ZitiIdentityId: identity.GetZitiIdentityId()})
+		if err := ignoreMissing(nil, err); err != nil {
+			log.Printf("delete orphan OpenZiti identity %s failed: %v", identity.GetZitiIdentityId(), err)
+		}
+	}
+}
+
+func (s *Server) listManagedServices(ctx context.Context) ([]*zitimgmtv1.OpenZitiService, error) {
+	var services []*zitimgmtv1.OpenZitiService
+	pageToken := ""
+	for {
+		response, err := s.zitiManagementClient.ListServicesByTag(ctx, &zitimgmtv1.ListServicesByTagRequest{Tags: managedTags(), PageSize: 100, PageToken: pageToken})
+		if err != nil {
+			return nil, err
+		}
+		services = append(services, response.GetServices()...)
+		pageToken = response.GetNextPageToken()
+		if pageToken == "" {
+			return services, nil
+		}
+	}
+}
+
+func (s *Server) listManagedIdentities(ctx context.Context) ([]*zitimgmtv1.OpenZitiIdentity, error) {
+	var identities []*zitimgmtv1.OpenZitiIdentity
+	pageToken := ""
+	for {
+		response, err := s.zitiManagementClient.ListIdentitiesByTag(ctx, &zitimgmtv1.ListIdentitiesByTagRequest{Tags: managedTags(), PageSize: 100, PageToken: pageToken})
+		if err != nil {
+			return nil, err
+		}
+		identities = append(identities, response.GetIdentities()...)
+		pageToken = response.GetNextPageToken()
+		if pageToken == "" {
+			return identities, nil
+		}
+	}
+}
+
+func (s *Server) listManagedServicePolicies(ctx context.Context) ([]*zitimgmtv1.OpenZitiServicePolicy, error) {
+	var policies []*zitimgmtv1.OpenZitiServicePolicy
+	pageToken := ""
+	for {
+		response, err := s.zitiManagementClient.ListServicePoliciesByTag(ctx, &zitimgmtv1.ListServicePoliciesByTagRequest{Tags: managedTags(), PageSize: 100, PageToken: pageToken})
+		if err != nil {
+			return nil, err
+		}
+		policies = append(policies, response.GetServicePolicies()...)
+		pageToken = response.GetNextPageToken()
+		if pageToken == "" {
+			return policies, nil
+		}
+	}
+}
+
+func managedTags() map[string]string {
+	return map[string]string{"managed_by": managedByNetworksService}
+}

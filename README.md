@@ -14,5 +14,7 @@ Networks is the control-plane service for Private Networks. This initial skeleto
 | `GROUPS_GRPC_TARGET` | `groups:50051` | no | Groups service target. |
 | `NOTIFICATIONS_GRPC_TARGET` | `notifications:50051` | no | Notifications service target. |
 | `NATS_URL` | | no | NATS/JetStream URL for later event publishing slices. |
+| `TUNNEL_LIVENESS_INTERVAL` | `1m` | no | Interval for polling tunnel identity enrollment/connectivity from Ziti Management. |
+| `RECONCILIATION_INTERVAL` | `5m` | no | Interval for reconciling stored desired state with OpenZiti resources. |
 
 The skeleton applies migrations on startup, registers the Networks gRPC service, and can start without Authorization, Ziti Management, Groups, NATS, or Notifications when `DEPENDENCY_CLIENTS_ENABLED=false`.

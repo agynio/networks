@@ -168,3 +168,11 @@ type ListPrivateResourceAccessFilter struct {
 	PrincipalType     *PrincipalType
 	PrincipalID       *uuid.UUID
 }
+
+type UpdateTunnelCredentialLivenessInput struct {
+	ID              uuid.UUID
+	EnrollmentState TunnelEnrollmentState
+	Connectivity    TunnelConnectivity
+	EnrolledAt      *time.Time
+	LastSeenAt      *time.Time
+}

@@ -111,6 +111,15 @@ func (s *Store) ListNetworks(ctx context.Context, organizationID uuid.UUID, page
 	)
 }
 
+func (s *Store) ListAllNetworks(ctx context.Context) ([]Network, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM networks ORDER BY id`, networkColumns))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanNetwork)
+}
+
 func (s *Store) UpdateNetwork(ctx context.Context, input UpdateNetworkInput) (Network, error) {
 	builder := updateBuilder{}
 	if input.Name != nil {
@@ -180,6 +189,29 @@ func (s *Store) ListTunnelCredentials(ctx context.Context, networkID uuid.UUID, 
 	)
 }
 
+func (s *Store) ListAllTunnelCredentials(ctx context.Context) ([]TunnelCredential, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM tunnel_credentials JOIN networks ON networks.id = tunnel_credentials.network_id ORDER BY tunnel_credentials.id`, tunnelCredentialColumns))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanTunnelCredential)
+}
+
+func (s *Store) UpdateTunnelCredentialLiveness(ctx context.Context, input UpdateTunnelCredentialLivenessInput) (TunnelCredential, error) {
+	credential, err := scanTunnelCredential(s.pool.QueryRow(ctx,
+		fmt.Sprintf(`UPDATE tunnel_credentials SET enrollment_state = $1, connectivity = $2, enrolled_at = $3, last_seen_at = $4, updated_at = NOW() WHERE id = $5 RETURNING %s`, tunnelCredentialInsertColumns),
+		input.EnrollmentState, input.Connectivity, input.EnrolledAt, input.LastSeenAt, input.ID,
+	))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TunnelCredential{}, NotFound("tunnel credential")
+		}
+		return TunnelCredential{}, err
+	}
+	return credential, nil
+}
+
 func (s *Store) DeleteTunnelCredential(ctx context.Context, id uuid.UUID) error {
 	commandTag, err := s.pool.Exec(ctx, `DELETE FROM tunnel_credentials WHERE id = $1`, id)
 	if err != nil {
@@ -239,6 +271,15 @@ func (s *Store) ListPrivateResources(ctx context.Context, filter ListPrivateReso
 		clauses, args = appendClause(clauses, args, "network_id = $%d", *filter.NetworkID)
 	}
 	return listEntities(ctx, s.pool, fmt.Sprintf("SELECT %s FROM private_resources", privateResourceColumns), clauses, args, cursor, pageSize, "private_resources.id", scanPrivateResource, func(resource PrivateResource) uuid.UUID { return resource.Meta.ID })
+}
+
+func (s *Store) ListAllPrivateResources(ctx context.Context) ([]PrivateResource, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resources ORDER BY id`, privateResourceColumns))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanPrivateResource)
 }
 
 func (s *Store) UpdatePrivateResource(ctx context.Context, input UpdatePrivateResourceInput) (PrivateResource, error) {
@@ -353,6 +394,24 @@ func (s *Store) ListPrivateResourceAccess(ctx context.Context, filter ListPrivat
 	return listEntities(ctx, s.pool, fmt.Sprintf("SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id", privateResourceAccessColumns), clauses, args, cursor, pageSize, "private_resource_accesses.id", scanPrivateResourceAccess, func(access PrivateResourceAccess) uuid.UUID { return access.Meta.ID })
 }
 
+func (s *Store) ListAllPrivateResourceAccess(ctx context.Context) ([]PrivateResourceAccess, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id ORDER BY private_resource_accesses.id`, privateResourceAccessColumns))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanPrivateResourceAccess)
+}
+
+func (s *Store) ListPrivateResourceAccessByGroupID(ctx context.Context, groupID uuid.UUID) ([]PrivateResourceAccess, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id WHERE principal_type = $1 AND principal_id = $2 ORDER BY private_resource_accesses.id`, privateResourceAccessColumns), PrincipalTypeGroup, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanPrivateResourceAccess)
+}
+
 func (s *Store) DeletePrivateResourceAccess(ctx context.Context, id uuid.UUID) error {
 	commandTag, err := s.pool.Exec(ctx, `DELETE FROM private_resource_accesses WHERE id = $1`, id)
 	if err != nil {
@@ -393,4 +452,21 @@ func scanPrivateResourceAccess(row pgx.Row) (PrivateResourceAccess, error) {
 	var access PrivateResourceAccess
 	err := row.Scan(&access.Meta.ID, &access.PrivateResourceID, &access.OrganizationID, &access.NetworkID, &access.PrincipalType, &access.PrincipalID, &access.ProvisioningState, &access.OpenZitiDialPolicyID, &access.Meta.CreatedAt, &access.Meta.UpdatedAt)
 	return access, err
+}
+
+type rowScanner[T any] func(pgx.Row) (T, error)
+
+func scanRows[T any](rows pgx.Rows, scanner rowScanner[T]) ([]T, error) {
+	values := []T{}
+	for rows.Next() {
+		value, err := scanner(rows)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
 }

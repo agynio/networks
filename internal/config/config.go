@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
@@ -16,6 +17,8 @@ type Config struct {
 	GroupsGRPCTarget         string
 	NotificationsGRPCTarget  string
 	NATSURL                  string
+	TunnelLivenessInterval   time.Duration
+	ReconciliationInterval   time.Duration
 }
 
 func FromEnv() (Config, error) {
@@ -57,5 +60,26 @@ func FromEnv() (Config, error) {
 		cfg.NotificationsGRPCTarget = "notifications:50051"
 	}
 	cfg.NATSURL = os.Getenv("NATS_URL")
+	var err error
+	cfg.TunnelLivenessInterval, err = durationFromEnv("TUNNEL_LIVENESS_INTERVAL", time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ReconciliationInterval, err = durationFromEnv("RECONCILIATION_INTERVAL", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func durationFromEnv(name string, defaultValue time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return duration, nil
 }

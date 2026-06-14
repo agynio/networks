@@ -73,6 +73,27 @@ func TestTunnelCredentialJWTReturnedOnceAndNotStored(t *testing.T) {
 	if stored.OpenZitiIdentityID != "ziti-tunnel" {
 		t.Fatalf("expected OpenZiti identity stored")
 	}
+	if len(ziti.patchedIdentityRoles) != 1 {
+		t.Fatalf("expected tunnel identity role attrs patched")
+	}
+	assertStringSlice(t, ziti.patchedIdentityRoles[0].GetAdd(), []string{"tunnels", "network-" + network.Meta.ID.String()})
+}
+
+func TestTunnelCredentialCreateFailsWhenZitiCreateFails(t *testing.T) {
+	fakeStore := newFakeStore()
+	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
+	ziti := &fakeZitiManagementClient{createTunnelErr: status.Error(codes.Unavailable, "controller unavailable")}
+	server := NewWithClients(fakeStore, authz, nil, nil, ziti)
+	callerID := uuid.New()
+	orgID := uuid.New()
+	network := fakeStore.mustCreateNetwork(orgID)
+	authz.allow(identityObject(callerID), organizationOwnerRelation, organizationObject(orgID))
+
+	_, err := server.CreateTunnelCredential(callerContext(callerID), &networksv1.CreateTunnelCredentialRequest{NetworkId: network.Meta.ID.String()})
+	assertCode(t, err, codes.Unavailable)
+	if len(fakeStore.credentials) != 0 {
+		t.Fatalf("did not expect failed credential persisted")
+	}
 }
 
 func TestPrivateResourceServiceConfigsPreservePositionalPorts(t *testing.T) {
@@ -250,6 +271,12 @@ type fakeZitiManagementClient struct {
 	createPolicyErr        error
 	createServiceErr       error
 	createTunnelErr        error
+	patchedIdentityRoles   []*zitimgmtv1.PatchIdentityRoleAttributesRequest
+	liveness               *zitimgmtv1.GetIdentityLivenessResponse
+	livenessErr            error
+	listedServices         []*zitimgmtv1.OpenZitiService
+	listedIdentities       []*zitimgmtv1.OpenZitiIdentity
+	listedPolicies         []*zitimgmtv1.OpenZitiServicePolicy
 }
 
 func (f *fakeZitiManagementClient) CreateService(_ context.Context, request *zitimgmtv1.CreateServiceRequest, _ ...grpc.CallOption) (*zitimgmtv1.CreateServiceResponse, error) {
@@ -300,4 +327,28 @@ func (f *fakeZitiManagementClient) CreateTunnelIdentity(_ context.Context, reque
 func (f *fakeZitiManagementClient) DeleteTunnelIdentity(_ context.Context, request *zitimgmtv1.DeleteTunnelIdentityRequest, _ ...grpc.CallOption) (*zitimgmtv1.DeleteTunnelIdentityResponse, error) {
 	f.deletedTunnelIdentity = append(f.deletedTunnelIdentity, request.GetZitiIdentityId())
 	return &zitimgmtv1.DeleteTunnelIdentityResponse{}, f.deleteTunnelErr
+}
+
+func (f *fakeZitiManagementClient) PatchIdentityRoleAttributes(_ context.Context, request *zitimgmtv1.PatchIdentityRoleAttributesRequest, _ ...grpc.CallOption) (*zitimgmtv1.PatchIdentityRoleAttributesResponse, error) {
+	f.patchedIdentityRoles = append(f.patchedIdentityRoles, request)
+	return &zitimgmtv1.PatchIdentityRoleAttributesResponse{}, nil
+}
+
+func (f *fakeZitiManagementClient) GetIdentityLiveness(_ context.Context, _ *zitimgmtv1.GetIdentityLivenessRequest, _ ...grpc.CallOption) (*zitimgmtv1.GetIdentityLivenessResponse, error) {
+	if f.liveness != nil || f.livenessErr != nil {
+		return f.liveness, f.livenessErr
+	}
+	return &zitimgmtv1.GetIdentityLivenessResponse{EnrollmentState: zitimgmtv1.IdentityEnrollmentState_IDENTITY_ENROLLMENT_STATE_PENDING}, nil
+}
+
+func (f *fakeZitiManagementClient) ListServicesByTag(_ context.Context, _ *zitimgmtv1.ListServicesByTagRequest, _ ...grpc.CallOption) (*zitimgmtv1.ListServicesByTagResponse, error) {
+	return &zitimgmtv1.ListServicesByTagResponse{Services: f.listedServices}, nil
+}
+
+func (f *fakeZitiManagementClient) ListIdentitiesByTag(_ context.Context, _ *zitimgmtv1.ListIdentitiesByTagRequest, _ ...grpc.CallOption) (*zitimgmtv1.ListIdentitiesByTagResponse, error) {
+	return &zitimgmtv1.ListIdentitiesByTagResponse{Identities: f.listedIdentities}, nil
+}
+
+func (f *fakeZitiManagementClient) ListServicePoliciesByTag(_ context.Context, _ *zitimgmtv1.ListServicePoliciesByTagRequest, _ ...grpc.CallOption) (*zitimgmtv1.ListServicePoliciesByTagResponse, error) {
+	return &zitimgmtv1.ListServicePoliciesByTagResponse{ServicePolicies: f.listedPolicies}, nil
 }
