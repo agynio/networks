@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/agynio/networks/internal/store"
@@ -78,10 +77,8 @@ func validatePorts(field string, ports []int32) error {
 	return nil
 }
 
-func normalizePorts(ports []int32) []int32 {
-	normalized := append([]int32{}, ports...)
-	slices.Sort(normalized)
-	return normalized
+func copyPorts(ports []int32) []int32 {
+	return append([]int32{}, ports...)
 }
 
 func validateTargetHost(host string) error {

@@ -63,6 +63,7 @@ type Network struct {
 type TunnelCredential struct {
 	Meta                   EntityMeta
 	NetworkID              uuid.UUID
+	OrganizationID         uuid.UUID
 	OpenZitiIdentityID     string
 	EnrollmentJWTRevealed  bool
 	EnrollmentJWTExpiresAt *time.Time
@@ -90,6 +91,8 @@ type PrivateResource struct {
 type PrivateResourceAccess struct {
 	Meta                 EntityMeta
 	PrivateResourceID    uuid.UUID
+	OrganizationID       uuid.UUID
+	NetworkID            uuid.UUID
 	PrincipalType        PrincipalType
 	PrincipalID          uuid.UUID
 	ProvisioningState    ProvisioningState
@@ -129,9 +132,32 @@ type CreatePrivateResourceInput struct {
 	InterceptPorts []int32
 }
 
+type UpdatePrivateResourceInput struct {
+	ID             uuid.UUID
+	Name           *string
+	Protocol       *PrivateResourceProtocol
+	TargetHost     *string
+	TargetPorts    []int32
+	InterceptHost  *string
+	InterceptPorts []int32
+	UpdatePorts    bool
+}
+
 type CreatePrivateResourceAccessInput struct {
 	ID                uuid.UUID
 	PrivateResourceID uuid.UUID
 	PrincipalType     PrincipalType
 	PrincipalID       uuid.UUID
+}
+
+type ListPrivateResourcesFilter struct {
+	OrganizationID *uuid.UUID
+	NetworkID      *uuid.UUID
+}
+
+type ListPrivateResourceAccessFilter struct {
+	PrivateResourceID *uuid.UUID
+	NetworkID         *uuid.UUID
+	PrincipalType     *PrincipalType
+	PrincipalID       *uuid.UUID
 }

@@ -96,3 +96,72 @@ func newTestStore(t *testing.T) *Store {
 	require.NoError(t, db.ApplyMigrations(ctx, pool))
 	return New(pool)
 }
+
+func TestStorePrivateResourceAccessImmutableUnique(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	orgID := uuid.New()
+	networkID := uuid.New()
+	resourceID := uuid.New()
+	principalID := uuid.New()
+	_, err := store.CreateNetwork(ctx, CreateNetworkInput{ID: networkID, OrganizationID: orgID, Name: "corp"})
+	require.NoError(t, err)
+	_, err = store.CreatePrivateResource(ctx, CreatePrivateResourceInput{
+		ID:             resourceID,
+		OrganizationID: orgID,
+		NetworkID:      networkID,
+		Name:           "postgres",
+		Protocol:       PrivateResourceProtocolTCP,
+		TargetHost:     "postgres.internal",
+		TargetPorts:    []int32{5432},
+		InterceptHost:  "postgres.private.example.com",
+		InterceptPorts: []int32{15432},
+	})
+	require.NoError(t, err)
+
+	input := CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resourceID, PrincipalType: PrincipalTypeUser, PrincipalID: principalID}
+	_, err = store.CreatePrivateResourceAccess(ctx, input)
+	require.NoError(t, err)
+	input.ID = uuid.New()
+	_, err = store.CreatePrivateResourceAccess(ctx, input)
+	require.ErrorAs(t, err, new(*AlreadyExistsError))
+}
+
+func TestStoreUpdatePrivateResourceRewritesInterceptUniqueness(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	orgID := uuid.New()
+	networkID := uuid.New()
+	resourceID := uuid.New()
+	_, err := store.CreateNetwork(ctx, CreateNetworkInput{ID: networkID, OrganizationID: orgID, Name: "corp"})
+	require.NoError(t, err)
+	_, err = store.CreatePrivateResource(ctx, CreatePrivateResourceInput{
+		ID:             resourceID,
+		OrganizationID: orgID,
+		NetworkID:      networkID,
+		Name:           "postgres",
+		Protocol:       PrivateResourceProtocolTCP,
+		TargetHost:     "postgres.internal",
+		TargetPorts:    []int32{5432},
+		InterceptHost:  "postgres.private.example.com",
+		InterceptPorts: []int32{15432},
+	})
+	require.NoError(t, err)
+	interceptHost := "postgres2.private.example.com"
+	updated, err := store.UpdatePrivateResource(ctx, UpdatePrivateResourceInput{ID: resourceID, InterceptHost: &interceptHost})
+	require.NoError(t, err)
+	require.Equal(t, interceptHost, updated.InterceptHost)
+
+	_, err = store.CreatePrivateResource(ctx, CreatePrivateResourceInput{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		NetworkID:      networkID,
+		Name:           "postgres-old-host",
+		Protocol:       PrivateResourceProtocolTCP,
+		TargetHost:     "postgres-old.internal",
+		TargetPorts:    []int32{5432},
+		InterceptHost:  "postgres.private.example.com",
+		InterceptPorts: []int32{15432},
+	})
+	require.NoError(t, err)
+}

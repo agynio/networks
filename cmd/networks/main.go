@@ -12,6 +12,7 @@ import (
 
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
+	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
 	networksv1 "github.com/agynio/networks/.gen/go/agynio/api/networks/v1"
 	notificationsv1 "github.com/agynio/networks/.gen/go/agynio/api/notifications/v1"
 	zitimgmtv1 "github.com/agynio/networks/.gen/go/agynio/api/ziti_management/v1"
@@ -58,13 +59,25 @@ func run() error {
 			_ = conn.Close()
 		}
 	}
+	var (
+		authorizationClient authorizationv1.AuthorizationServiceClient
+		identityClient      identityv1.IdentityServiceClient
+		groupsClient        groupsv1.GroupsServiceClient
+	)
 	if cfg.DependencyClientsEnabled {
 		authConn, err := grpc.NewClient(cfg.AuthorizationGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			return fmt.Errorf("connect to authorization: %w", err)
 		}
 		defer closeConn(authConn)
-		_ = authorizationv1.NewAuthorizationServiceClient(authConn)
+		authorizationClient = authorizationv1.NewAuthorizationServiceClient(authConn)
+
+		identityConn, err := grpc.NewClient(cfg.IdentityGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("connect to identity: %w", err)
+		}
+		defer closeConn(identityConn)
+		identityClient = identityv1.NewIdentityServiceClient(identityConn)
 
 		zitiConn, err := grpc.NewClient(cfg.ZitiManagementGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -78,7 +91,7 @@ func run() error {
 			return fmt.Errorf("connect to groups: %w", err)
 		}
 		defer closeConn(groupsConn)
-		_ = groupsv1.NewGroupsServiceClient(groupsConn)
+		groupsClient = groupsv1.NewGroupsServiceClient(groupsConn)
 
 		notificationsConn, err := grpc.NewClient(cfg.NotificationsGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -93,7 +106,7 @@ func run() error {
 	}
 
 	grpcServer := grpc.NewServer()
-	networksv1.RegisterNetworksServiceServer(grpcServer, server.New(store.New(pool)))
+	networksv1.RegisterNetworksServiceServer(grpcServer, server.NewWithClients(store.New(pool), authorizationClient, identityClient, groupsClient))
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
