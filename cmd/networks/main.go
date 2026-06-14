@@ -63,6 +63,7 @@ func run() error {
 		authorizationClient authorizationv1.AuthorizationServiceClient
 		identityClient      identityv1.IdentityServiceClient
 		groupsClient        groupsv1.GroupsServiceClient
+		zitiClient          zitimgmtv1.ZitiManagementServiceClient
 	)
 	if cfg.DependencyClientsEnabled {
 		authConn, err := grpc.NewClient(cfg.AuthorizationGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -84,7 +85,7 @@ func run() error {
 			return fmt.Errorf("connect to ziti management: %w", err)
 		}
 		defer closeConn(zitiConn)
-		_ = zitimgmtv1.NewZitiManagementServiceClient(zitiConn)
+		zitiClient = zitimgmtv1.NewZitiManagementServiceClient(zitiConn)
 
 		groupsConn, err := grpc.NewClient(cfg.GroupsGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -106,7 +107,7 @@ func run() error {
 	}
 
 	grpcServer := grpc.NewServer()
-	networksv1.RegisterNetworksServiceServer(grpcServer, server.NewWithClients(store.New(pool), authorizationClient, identityClient, groupsClient))
+	networksv1.RegisterNetworksServiceServer(grpcServer, server.NewWithClients(store.New(pool), authorizationClient, identityClient, groupsClient, zitiClient))
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {

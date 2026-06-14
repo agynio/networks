@@ -100,10 +100,12 @@ type PrivateResourceAccess struct {
 }
 
 type CreateNetworkInput struct {
-	ID             uuid.UUID
-	OrganizationID uuid.UUID
-	Name           string
-	Description    string
+	ID                   uuid.UUID
+	OrganizationID       uuid.UUID
+	Name                 string
+	Description          string
+	ProvisioningState    ProvisioningState
+	OpenZitiBindPolicyID string
 }
 
 type UpdateNetworkInput struct {
@@ -118,18 +120,21 @@ type CreateTunnelCredentialInput struct {
 	OpenZitiIdentityID     string
 	EnrollmentJWTRevealed  bool
 	EnrollmentJWTExpiresAt *time.Time
+	ProvisioningState      ProvisioningState
 }
 
 type CreatePrivateResourceInput struct {
-	ID             uuid.UUID
-	OrganizationID uuid.UUID
-	NetworkID      uuid.UUID
-	Name           string
-	Protocol       PrivateResourceProtocol
-	TargetHost     string
-	TargetPorts    []int32
-	InterceptHost  string
-	InterceptPorts []int32
+	ID                uuid.UUID
+	OrganizationID    uuid.UUID
+	NetworkID         uuid.UUID
+	Name              string
+	Protocol          PrivateResourceProtocol
+	TargetHost        string
+	TargetPorts       []int32
+	InterceptHost     string
+	InterceptPorts    []int32
+	ProvisioningState ProvisioningState
+	OpenZitiServiceID string
 }
 
 type UpdatePrivateResourceInput struct {
@@ -144,10 +149,12 @@ type UpdatePrivateResourceInput struct {
 }
 
 type CreatePrivateResourceAccessInput struct {
-	ID                uuid.UUID
-	PrivateResourceID uuid.UUID
-	PrincipalType     PrincipalType
-	PrincipalID       uuid.UUID
+	ID                   uuid.UUID
+	PrivateResourceID    uuid.UUID
+	PrincipalType        PrincipalType
+	PrincipalID          uuid.UUID
+	ProvisioningState    ProvisioningState
+	OpenZitiDialPolicyID string
 }
 
 type ListPrivateResourcesFilter struct {

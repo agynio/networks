@@ -21,7 +21,7 @@ import (
 func TestCreateNetworkRequiresOwner(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	_, err := server.CreateNetwork(callerContext(callerID), &networksv1.CreateNetworkRequest{OrganizationId: orgID.String(), Name: "corp"})
@@ -40,7 +40,7 @@ func TestCreateNetworkRequiresOwner(t *testing.T) {
 func TestCreatePrivateResourceValidatesPortsAndHost(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	network := store.mustCreateNetwork(orgID)
@@ -72,7 +72,7 @@ func TestCreatePrivateResourceValidatesPortsAndHost(t *testing.T) {
 func TestCreatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	network := store.mustCreateNetwork(orgID)
@@ -97,7 +97,7 @@ func TestCreatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
 func TestUpdatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	resource := store.mustCreatePrivateResource(store.mustCreateNetwork(orgID))
@@ -119,7 +119,7 @@ func TestCreatePrivateResourceAccessRejectsCrossOrgUser(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	identity := &fakeIdentityClient{types: map[string]identityv1.IdentityType{}}
-	server := NewWithClients(store, authz, identity, nil)
+	server := NewWithClients(store, authz, identity, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	principalID := uuid.New()
@@ -139,7 +139,7 @@ func TestCreatePrivateResourceAccessAgentUsesCanEditConfig(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	identity := &fakeIdentityClient{types: map[string]identityv1.IdentityType{}}
-	server := NewWithClients(store, authz, identity, nil)
+	server := NewWithClients(store, authz, identity, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	agentID := uuid.New()
@@ -169,7 +169,7 @@ func TestCreatePrivateResourceAccessRejectsCrossOrgGroup(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	groups := &fakeGroupsClient{groups: map[string]*groupsv1.Group{}}
-	server := NewWithClients(store, authz, nil, groups)
+	server := NewWithClients(store, authz, nil, groups, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	otherOrgID := uuid.New()
@@ -309,7 +309,7 @@ func (f *fakeStore) DeleteNetwork(_ context.Context, id uuid.UUID) error {
 
 func (f *fakeStore) CreateTunnelCredential(_ context.Context, input store.CreateTunnelCredentialInput) (store.TunnelCredential, error) {
 	network := f.networks[input.NetworkID]
-	credential := store.TunnelCredential{Meta: fakeMeta(input.ID), NetworkID: input.NetworkID, OrganizationID: network.OrganizationID, EnrollmentState: store.TunnelEnrollmentStatePending, Connectivity: store.TunnelConnectivityOffline, ProvisioningState: store.ProvisioningStateActive}
+	credential := store.TunnelCredential{Meta: fakeMeta(input.ID), NetworkID: input.NetworkID, OrganizationID: network.OrganizationID, OpenZitiIdentityID: input.OpenZitiIdentityID, EnrollmentJWTRevealed: input.EnrollmentJWTRevealed, EnrollmentJWTExpiresAt: input.EnrollmentJWTExpiresAt, EnrollmentState: store.TunnelEnrollmentStatePending, Connectivity: store.TunnelConnectivityOffline, ProvisioningState: input.ProvisioningState}
 	f.credentials[input.ID] = credential
 	return credential, nil
 }
@@ -371,5 +371,39 @@ func (f *fakeStore) ListPrivateResourceAccess(context.Context, store.ListPrivate
 	return nil, nil, nil
 }
 func (f *fakeStore) DeletePrivateResourceAccess(context.Context, uuid.UUID) error { return nil }
+
+func (f *fakeStore) UpdateNetworkProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiBindPolicyID string) (store.Network, error) {
+	network := f.networks[id]
+	network.ProvisioningState = state
+	network.OpenZitiBindPolicyID = openZitiBindPolicyID
+	f.networks[id] = network
+	return network, nil
+}
+
+func (f *fakeStore) UpdateTunnelCredentialProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiIdentityID string, enrollmentJWTRevealed bool, enrollmentJWTExpiresAt *time.Time) (store.TunnelCredential, error) {
+	credential := f.credentials[id]
+	credential.ProvisioningState = state
+	credential.OpenZitiIdentityID = openZitiIdentityID
+	credential.EnrollmentJWTRevealed = enrollmentJWTRevealed
+	credential.EnrollmentJWTExpiresAt = enrollmentJWTExpiresAt
+	f.credentials[id] = credential
+	return credential, nil
+}
+
+func (f *fakeStore) UpdatePrivateResourceProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiServiceID string) (store.PrivateResource, error) {
+	resource := f.resources[id]
+	resource.ProvisioningState = state
+	resource.OpenZitiServiceID = openZitiServiceID
+	f.resources[id] = resource
+	return resource, nil
+}
+
+func (f *fakeStore) UpdatePrivateResourceAccessProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiDialPolicyID string) (store.PrivateResourceAccess, error) {
+	access := f.accesses[id]
+	access.ProvisioningState = state
+	access.OpenZitiDialPolicyID = openZitiDialPolicyID
+	f.accesses[id] = access
+	return access, nil
+}
 
 var _ Store = (*fakeStore)(nil)
