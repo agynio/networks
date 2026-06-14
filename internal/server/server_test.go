@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -66,6 +67,52 @@ func TestCreatePrivateResourceValidatesPortsAndHost(t *testing.T) {
 		InterceptPorts: []int32{15432, 15433},
 	})
 	assertCode(t, err, codes.InvalidArgument)
+}
+
+func TestCreatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
+	store := newFakeStore()
+	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
+	server := NewWithClients(store, authz, nil, nil)
+	callerID := uuid.New()
+	orgID := uuid.New()
+	network := store.mustCreateNetwork(orgID)
+	authz.allow(identityObject(callerID), organizationOwnerRelation, organizationObject(orgID))
+
+	response, err := server.CreatePrivateResource(callerContext(callerID), &networksv1.CreatePrivateResourceRequest{
+		NetworkId:      network.Meta.ID.String(),
+		Name:           "postgres",
+		Protocol:       networksv1.PrivateResourceProtocol_PRIVATE_RESOURCE_PROTOCOL_TCP,
+		TargetHost:     "postgres.internal",
+		TargetPorts:    []int32{5433, 5432},
+		InterceptHost:  "postgres.private.example.com",
+		InterceptPorts: []int32{15432, 15433},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrivateResource: %v", err)
+	}
+	assertInt32Slice(t, response.GetPrivateResource().GetTargetPorts(), []int32{5433, 5432})
+	assertInt32Slice(t, response.GetPrivateResource().GetInterceptPorts(), []int32{15432, 15433})
+}
+
+func TestUpdatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
+	store := newFakeStore()
+	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
+	server := NewWithClients(store, authz, nil, nil)
+	callerID := uuid.New()
+	orgID := uuid.New()
+	resource := store.mustCreatePrivateResource(store.mustCreateNetwork(orgID))
+	authz.allow(identityObject(callerID), organizationOwnerRelation, organizationObject(orgID))
+
+	response, err := server.UpdatePrivateResource(callerContext(callerID), &networksv1.UpdatePrivateResourceRequest{
+		Id:                   resource.Meta.ID.String(),
+		TargetPortsUpdate:    &networksv1.PortListUpdate{Ports: []int32{9443, 8443}},
+		InterceptPortsUpdate: &networksv1.PortListUpdate{Ports: []int32{443, 8443}},
+	})
+	if err != nil {
+		t.Fatalf("UpdatePrivateResource: %v", err)
+	}
+	assertInt32Slice(t, response.GetPrivateResource().GetTargetPorts(), []int32{9443, 8443})
+	assertInt32Slice(t, response.GetPrivateResource().GetInterceptPorts(), []int32{443, 8443})
 }
 
 func TestCreatePrivateResourceAccessRejectsCrossOrgUser(t *testing.T) {
@@ -147,6 +194,13 @@ func assertCode(t *testing.T, err error, code codes.Code) {
 	t.Helper()
 	if status.Code(err) != code {
 		t.Fatalf("expected code %s, got %s err=%v", code, status.Code(err), err)
+	}
+}
+
+func assertInt32Slice(t *testing.T, got []int32, want []int32) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected %v, got %v", want, got)
 	}
 }
 
@@ -280,8 +334,26 @@ func (f *fakeStore) GetPrivateResource(_ context.Context, id uuid.UUID) (store.P
 func (f *fakeStore) ListPrivateResources(context.Context, store.ListPrivateResourcesFilter, int32, *store.PageCursor) ([]store.PrivateResource, *store.PageCursor, error) {
 	return nil, nil, nil
 }
-func (f *fakeStore) UpdatePrivateResource(context.Context, store.UpdatePrivateResourceInput) (store.PrivateResource, error) {
-	return store.PrivateResource{}, nil
+func (f *fakeStore) UpdatePrivateResource(_ context.Context, input store.UpdatePrivateResourceInput) (store.PrivateResource, error) {
+	resource := f.resources[input.ID]
+	if input.Name != nil {
+		resource.Name = *input.Name
+	}
+	if input.Protocol != nil {
+		resource.Protocol = *input.Protocol
+	}
+	if input.TargetHost != nil {
+		resource.TargetHost = *input.TargetHost
+	}
+	if input.InterceptHost != nil {
+		resource.InterceptHost = *input.InterceptHost
+	}
+	if input.UpdatePorts {
+		resource.TargetPorts = input.TargetPorts
+		resource.InterceptPorts = input.InterceptPorts
+	}
+	f.resources[input.ID] = resource
+	return resource, nil
 }
 func (f *fakeStore) DeletePrivateResource(context.Context, uuid.UUID) error { return nil }
 

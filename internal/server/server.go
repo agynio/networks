@@ -474,9 +474,9 @@ func createPrivateResourceInput(request *networksv1.CreatePrivateResourceRequest
 		Name:           name,
 		Protocol:       protocol,
 		TargetHost:     targetHost,
-		TargetPorts:    normalizePorts(request.GetTargetPorts()),
+		TargetPorts:    copyPorts(request.GetTargetPorts()),
 		InterceptHost:  interceptHost,
-		InterceptPorts: normalizePorts(request.GetInterceptPorts()),
+		InterceptPorts: copyPorts(request.GetInterceptPorts()),
 	}, nil
 }
 
@@ -517,8 +517,8 @@ func updatePrivateResourceInput(request *networksv1.UpdatePrivateResourceRequest
 		if err := validatePortMapping(request.GetTargetPortsUpdate().GetPorts(), request.GetInterceptPortsUpdate().GetPorts()); err != nil {
 			return store.UpdatePrivateResourceInput{}, status.Errorf(codes.InvalidArgument, "ports: %v", err)
 		}
-		input.TargetPorts = normalizePorts(request.GetTargetPortsUpdate().GetPorts())
-		input.InterceptPorts = normalizePorts(request.GetInterceptPortsUpdate().GetPorts())
+		input.TargetPorts = copyPorts(request.GetTargetPortsUpdate().GetPorts())
+		input.InterceptPorts = copyPorts(request.GetInterceptPortsUpdate().GetPorts())
 		input.UpdatePorts = true
 	}
 	return input, nil
