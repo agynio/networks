@@ -27,7 +27,9 @@ func (s *Server) HandleGroupDeleted(ctx context.Context, event *groupsv1.GroupDe
 		if err := s.store.DeletePrivateResourceAccess(ctx, access.Meta.ID); err != nil {
 			return err
 		}
-		s.publishAccessRevoked(ctx, access)
+		if err := s.publishAccessRevoked(ctx, access); err != nil {
+			return err
+		}
 	}
 	return nil
 }

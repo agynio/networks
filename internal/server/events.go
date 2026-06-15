@@ -48,26 +48,32 @@ func (s *Server) publishPrivateResourceUpdated(ctx context.Context, resource sto
 	})
 }
 
-func (s *Server) publishAccessGranted(ctx context.Context, access store.PrivateResourceAccess) {
+func (s *Server) publishAccessGranted(ctx context.Context, access store.PrivateResourceAccess) error {
 	event := &networksv1.PrivateResourceAccessGrantedEvent{
 		PrivateResourceAccessId: access.Meta.ID.String(),
 		PrivateResourceId:       access.PrivateResourceID.String(),
 		PrincipalType:           convertPrincipalType(access.PrincipalType),
 		PrincipalId:             access.PrincipalID.String(),
 	}
-	s.publishProtoEvent(ctx, accessGrantedSubject, newEventEnvelope(access.Meta.CreatedAt, event), event)
+	if err := s.publishProtoEvent(ctx, accessGrantedSubject, newEventEnvelope(access.Meta.CreatedAt, event), event); err != nil {
+		return err
+	}
 	s.publishPrivateResourceAccessUpdated(ctx, access)
+	return nil
 }
 
-func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateResourceAccess) {
+func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateResourceAccess) error {
 	event := &networksv1.PrivateResourceAccessRevokedEvent{
 		PrivateResourceAccessId: access.Meta.ID.String(),
 		PrivateResourceId:       access.PrivateResourceID.String(),
 		PrincipalType:           convertPrincipalType(access.PrincipalType),
 		PrincipalId:             access.PrincipalID.String(),
 	}
-	s.publishProtoEvent(ctx, accessRevokedSubject, newEventEnvelope(s.now(), event), event)
+	if err := s.publishProtoEvent(ctx, accessRevokedSubject, newEventEnvelope(s.now(), event), event); err != nil {
+		return err
+	}
 	s.publishPrivateResourceAccessUpdated(ctx, access)
+	return nil
 }
 
 func (s *Server) publishPrivateResourceAccessUpdated(ctx context.Context, access store.PrivateResourceAccess) {
@@ -82,12 +88,12 @@ func (s *Server) publishPrivateResourceAccessUpdated(ctx context.Context, access
 func (s *Server) publishTunnelConnectivity(ctx context.Context, credential store.TunnelCredential) {
 	if credential.Connectivity == store.TunnelConnectivityOnline {
 		event := &networksv1.TunnelOnlineEvent{TunnelCredentialId: credential.Meta.ID.String(), NetworkId: credential.NetworkID.String()}
-		s.publishProtoEvent(ctx, tunnelOnlineSubject, newEventEnvelope(s.now(), event), event)
+		_ = s.publishProtoEvent(ctx, tunnelOnlineSubject, newEventEnvelope(s.now(), event), event)
 		s.publishTunnelStatusChanged(ctx, credential)
 		return
 	}
 	event := &networksv1.TunnelOfflineEvent{TunnelCredentialId: credential.Meta.ID.String(), NetworkId: credential.NetworkID.String()}
-	s.publishProtoEvent(ctx, tunnelOfflineSubject, newEventEnvelope(s.now(), event), event)
+	_ = s.publishProtoEvent(ctx, tunnelOfflineSubject, newEventEnvelope(s.now(), event), event)
 	s.publishTunnelStatusChanged(ctx, credential)
 }
 
@@ -100,9 +106,9 @@ func (s *Server) publishTunnelStatusChanged(ctx context.Context, credential stor
 	})
 }
 
-func (s *Server) publishProtoEvent(ctx context.Context, subject string, envelope EventEnvelope, message proto.Message) {
+func (s *Server) publishProtoEvent(ctx context.Context, subject string, envelope EventEnvelope, message proto.Message) error {
 	if s.eventPublisher == nil {
-		return
+		return nil
 	}
 	payload, err := proto.Marshal(message)
 	if err != nil {
@@ -110,7 +116,9 @@ func (s *Server) publishProtoEvent(ctx context.Context, subject string, envelope
 	}
 	if err := s.eventPublisher.Publish(ctx, subject, envelope, payload); err != nil {
 		log.Printf("publish %s failed: %v", subject, err)
+		return err
 	}
+	return nil
 }
 
 func (s *Server) publishNotification(ctx context.Context, organizationID fmt.Stringer, event string, payload map[string]any) {
