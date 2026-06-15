@@ -43,11 +43,14 @@ func TestTunnelLivenessUpdatesStateAndPublishesTransition(t *testing.T) {
 	if len(events.messages) != 1 || events.messages[0].subject != tunnelOnlineSubject {
 		t.Fatalf("expected online event, got %#v", events.messages)
 	}
-	if events.messages[0].messageID == credential.Meta.ID.String() {
+	if events.messages[0].envelope.EventID == credential.Meta.ID.String() {
 		t.Fatalf("expected event occurrence message id, got stable entity id")
 	}
-	if len(notifications.requests) != 1 || notifications.requests[0].GetEvent() != tunnelOnlineSubject {
-		t.Fatalf("expected online notification")
+	if events.messages[0].envelope.Schema != "agynio.api.networks.v1.TunnelOnlineEvent" {
+		t.Fatalf("expected schema header value, got %s", events.messages[0].envelope.Schema)
+	}
+	if len(notifications.requests) != 1 || notifications.requests[0].GetEvent() != tunnelStatusChangedNotification {
+		t.Fatalf("expected tunnel status notification")
 	}
 }
 
@@ -55,7 +58,9 @@ func TestDeleteNetworkCleansAllDependents(t *testing.T) {
 	fakeStore := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	ziti := &fakeZitiManagementClient{}
-	server := NewWithClients(fakeStore, authz, nil, nil, ziti)
+	notifications := &fakeNotificationsClient{}
+	events := &fakeEventPublisher{}
+	server := NewWithDependencies(fakeStore, authz, nil, nil, ziti, notifications, events)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	network := fakeStore.mustCreateNetwork(orgID)
@@ -88,13 +93,26 @@ func TestDeleteNetworkCleansAllDependents(t *testing.T) {
 	if len(ziti.deletedServicePolicies) != int(store.MaxListPageSize)+2 {
 		t.Fatalf("expected all access policies deleted, got %d", len(ziti.deletedServicePolicies))
 	}
+	if len(events.messages) != int(store.MaxListPageSize)+2 {
+		t.Fatalf("expected all access revoke events, got %d", len(events.messages))
+	}
+	for _, message := range events.messages {
+		if message.subject != accessRevokedSubject {
+			t.Fatalf("expected access revoked subject, got %s", message.subject)
+		}
+	}
+	if len(notifications.requests) != (int(store.MaxListPageSize)+2)*3+1 {
+		t.Fatalf("expected cascade notifications for access, credentials, resources, and network; got %d", len(notifications.requests))
+	}
 }
 
 func TestDeletePrivateResourceCleansAllAccessPolicies(t *testing.T) {
 	fakeStore := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	ziti := &fakeZitiManagementClient{}
-	server := NewWithClients(fakeStore, authz, nil, nil, ziti)
+	notifications := &fakeNotificationsClient{}
+	events := &fakeEventPublisher{}
+	server := NewWithDependencies(fakeStore, authz, nil, nil, ziti, notifications, events)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	resource := fakeStore.mustCreatePrivateResource(fakeStore.mustCreateNetwork(orgID))
@@ -116,6 +134,17 @@ func TestDeletePrivateResourceCleansAllAccessPolicies(t *testing.T) {
 	}
 	if len(ziti.deletedServicePolicies) != int(store.MaxListPageSize)+2 {
 		t.Fatalf("expected all access policies deleted, got %d", len(ziti.deletedServicePolicies))
+	}
+	if len(events.messages) != int(store.MaxListPageSize)+2 {
+		t.Fatalf("expected all access revoke events, got %d", len(events.messages))
+	}
+	for _, message := range events.messages {
+		if message.subject != accessRevokedSubject {
+			t.Fatalf("expected access revoked subject, got %s", message.subject)
+		}
+	}
+	if len(notifications.requests) != int(store.MaxListPageSize)+3 {
+		t.Fatalf("expected access and resource notifications, got %d", len(notifications.requests))
 	}
 }
 
@@ -260,13 +289,15 @@ func TestManagedTagLookupMatchesCreatedTags(t *testing.T) {
 	}
 }
 
-func TestEventPublisherFireAndForgetFailure(t *testing.T) {
+func TestAccessPublishFailureReturnsError(t *testing.T) {
 	fakeStore := newFakeStore()
 	events := &fakeEventPublisher{err: errors.New("nats down")}
 	server := NewWithDependencies(fakeStore, nil, nil, nil, nil, nil, events)
 	access := store.PrivateResourceAccess{Meta: fakeMeta(uuid.New()), PrivateResourceID: uuid.New(), OrganizationID: uuid.New(), PrincipalType: store.PrincipalTypeUser, PrincipalID: uuid.New()}
 
-	server.publishAccessGranted(context.Background(), access)
+	if err := server.publishAccessGranted(context.Background(), access); err == nil {
+		t.Fatalf("expected publish error")
+	}
 	if len(events.messages) != 1 {
 		t.Fatalf("expected attempted event publish")
 	}
@@ -321,9 +352,9 @@ func (f *fakeAcks) term(...nats.AckOpt) error {
 }
 
 type publishedMessage struct {
-	subject   string
-	messageID string
-	payload   []byte
+	subject  string
+	envelope EventEnvelope
+	payload  []byte
 }
 
 type fakeEventPublisher struct {
@@ -331,8 +362,8 @@ type fakeEventPublisher struct {
 	err      error
 }
 
-func (f *fakeEventPublisher) Publish(_ context.Context, subject string, messageID string, payload []byte) error {
-	f.messages = append(f.messages, publishedMessage{subject: subject, messageID: messageID, payload: payload})
+func (f *fakeEventPublisher) Publish(_ context.Context, subject string, envelope EventEnvelope, payload []byte) error {
+	f.messages = append(f.messages, publishedMessage{subject: subject, envelope: envelope, payload: payload})
 	return f.err
 }
 

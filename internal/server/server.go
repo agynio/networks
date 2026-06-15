@@ -73,7 +73,7 @@ type notificationsClient interface {
 }
 
 type eventPublisher interface {
-	Publish(context.Context, string, string, []byte) error
+	Publish(context.Context, string, EventEnvelope, []byte) error
 }
 
 type Server struct {
@@ -119,6 +119,7 @@ func (s *Server) CreateNetwork(ctx context.Context, request *networksv1.CreateNe
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishNetworkUpdated(ctx, network)
 	return &networksv1.CreateNetworkResponse{Network: convertNetwork(network)}, nil
 }
 
@@ -188,6 +189,7 @@ func (s *Server) UpdateNetwork(ctx context.Context, request *networksv1.UpdateNe
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishNetworkUpdated(ctx, network)
 	return &networksv1.UpdateNetworkResponse{Network: convertNetwork(network)}, nil
 }
 
@@ -221,6 +223,18 @@ func (s *Server) DeleteNetwork(ctx context.Context, request *networksv1.DeleteNe
 	if err := s.store.DeleteNetwork(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	for _, access := range accesses {
+		if err := s.publishAccessRevoked(ctx, access); err != nil {
+			return nil, status.Errorf(codes.Internal, "publish access revoked: %v", err)
+		}
+	}
+	for _, credential := range credentials {
+		s.publishTunnelCredentialUpdated(ctx, credential)
+	}
+	for _, resource := range resources {
+		s.publishPrivateResourceUpdated(ctx, resource)
+	}
+	s.publishNetworkUpdated(ctx, network)
 	return &networksv1.DeleteNetworkResponse{}, nil
 }
 
@@ -250,6 +264,7 @@ func (s *Server) CreateTunnelCredential(ctx context.Context, request *networksv1
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishTunnelCredentialUpdated(ctx, credential)
 	return &networksv1.CreateTunnelCredentialResponse{TunnelCredential: convertTunnelCredential(credential), EnrollmentJwt: enrollmentJWT}, nil
 }
 
@@ -316,6 +331,7 @@ func (s *Server) DeleteTunnelCredential(ctx context.Context, request *networksv1
 	if err := s.store.DeleteTunnelCredential(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishTunnelCredentialUpdated(ctx, credential)
 	return &networksv1.DeleteTunnelCredentialResponse{}, nil
 }
 
@@ -344,6 +360,7 @@ func (s *Server) CreatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.CreatePrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
 }
 
@@ -440,6 +457,7 @@ func (s *Server) UpdatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.UpdatePrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
 }
 
@@ -455,11 +473,11 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 	if err := s.requireOrganizationOwner(ctx, resource.OrganizationID); err != nil {
 		return nil, err
 	}
+	accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{PrivateResourceID: &id})
+	if err != nil {
+		return nil, toStatus(err)
+	}
 	if s.zitiManagementClient != nil {
-		accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{PrivateResourceID: &id})
-		if err != nil {
-			return nil, toStatus(err)
-		}
 		for _, access := range accesses {
 			if access.OpenZitiDialPolicyID != "" {
 				_, err := s.zitiManagementClient.DeleteServicePolicy(ctx, &zitimgmtv1.DeleteServicePolicyRequest{ZitiServicePolicyId: access.OpenZitiDialPolicyID})
@@ -478,6 +496,12 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 	if err := s.store.DeletePrivateResource(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	for _, access := range accesses {
+		if err := s.publishAccessRevoked(ctx, access); err != nil {
+			return nil, status.Errorf(codes.Internal, "publish access revoked: %v", err)
+		}
+	}
+	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.DeletePrivateResourceResponse{}, nil
 }
 
@@ -513,7 +537,9 @@ func (s *Server) CreatePrivateResourceAccess(ctx context.Context, request *netwo
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	s.publishAccessGranted(ctx, access)
+	if err := s.publishAccessGranted(ctx, access); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish access granted: %v", err)
+	}
 	return &networksv1.CreatePrivateResourceAccessResponse{PrivateResourceAccess: convertPrivateResourceAccess(access)}, nil
 }
 
@@ -538,7 +564,9 @@ func (s *Server) DeletePrivateResourceAccess(ctx context.Context, request *netwo
 	if err := s.store.DeletePrivateResourceAccess(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
-	s.publishAccessRevoked(ctx, access)
+	if err := s.publishAccessRevoked(ctx, access); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish access revoked: %v", err)
+	}
 	return &networksv1.DeletePrivateResourceAccessResponse{}, nil
 }
 

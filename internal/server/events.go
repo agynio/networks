@@ -17,36 +17,67 @@ const (
 
 	tunnelOnlineSubject      = "agyn.networks.tunnel.online"
 	tunnelOfflineSubject     = "agyn.networks.tunnel.offline"
-	accessGrantedSubject     = "agyn.networks.private_resource_access.granted"
-	accessRevokedSubject     = "agyn.networks.private_resource_access.revoked"
+	accessGrantedSubject     = "agyn.networks.access.granted"
+	accessRevokedSubject     = "agyn.networks.access.revoked"
 	networksNotificationRoom = "org-%s"
+
+	networkUpdatedNotification               = "network.updated"
+	tunnelCredentialUpdatedNotification      = "tunnel_credential.updated"
+	tunnelStatusChangedNotification          = "tunnel_status.changed"
+	privateResourceUpdatedNotification       = "private_resource.updated"
+	privateResourceAccessUpdatedNotification = "private_resource_access.updated"
 )
 
-func (s *Server) publishAccessGranted(ctx context.Context, access store.PrivateResourceAccess) {
+func (s *Server) publishNetworkUpdated(ctx context.Context, network store.Network) {
+	s.publishNotification(ctx, network.OrganizationID, networkUpdatedNotification, map[string]any{
+		"network_id": network.Meta.ID.String(),
+	})
+}
+
+func (s *Server) publishTunnelCredentialUpdated(ctx context.Context, credential store.TunnelCredential) {
+	s.publishNotification(ctx, credential.OrganizationID, tunnelCredentialUpdatedNotification, map[string]any{
+		"tunnel_credential_id": credential.Meta.ID.String(),
+		"network_id":           credential.NetworkID.String(),
+	})
+}
+
+func (s *Server) publishPrivateResourceUpdated(ctx context.Context, resource store.PrivateResource) {
+	s.publishNotification(ctx, resource.OrganizationID, privateResourceUpdatedNotification, map[string]any{
+		"private_resource_id": resource.Meta.ID.String(),
+		"network_id":          resource.NetworkID.String(),
+	})
+}
+
+func (s *Server) publishAccessGranted(ctx context.Context, access store.PrivateResourceAccess) error {
 	event := &networksv1.PrivateResourceAccessGrantedEvent{
 		PrivateResourceAccessId: access.Meta.ID.String(),
 		PrivateResourceId:       access.PrivateResourceID.String(),
 		PrincipalType:           convertPrincipalType(access.PrincipalType),
 		PrincipalId:             access.PrincipalID.String(),
 	}
-	s.publishProtoEvent(ctx, accessGrantedSubject, eventMessageID(accessGrantedSubject+"-"+access.Meta.ID.String()), event)
-	s.publishNotification(ctx, access.OrganizationID, accessGrantedSubject, map[string]any{
-		"private_resource_access_id": access.Meta.ID.String(),
-		"private_resource_id":        access.PrivateResourceID.String(),
-		"principal_type":             string(access.PrincipalType),
-		"principal_id":               access.PrincipalID.String(),
-	})
+	if err := s.publishProtoEvent(ctx, accessGrantedSubject, newEventEnvelope(access.Meta.CreatedAt, event), event); err != nil {
+		return err
+	}
+	s.publishPrivateResourceAccessUpdated(ctx, access)
+	return nil
 }
 
-func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateResourceAccess) {
+func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateResourceAccess) error {
 	event := &networksv1.PrivateResourceAccessRevokedEvent{
 		PrivateResourceAccessId: access.Meta.ID.String(),
 		PrivateResourceId:       access.PrivateResourceID.String(),
 		PrincipalType:           convertPrincipalType(access.PrincipalType),
 		PrincipalId:             access.PrincipalID.String(),
 	}
-	s.publishProtoEvent(ctx, accessRevokedSubject, eventMessageID(accessRevokedSubject+"-"+access.Meta.ID.String()), event)
-	s.publishNotification(ctx, access.OrganizationID, accessRevokedSubject, map[string]any{
+	if err := s.publishProtoEvent(ctx, accessRevokedSubject, newEventEnvelope(s.now(), event), event); err != nil {
+		return err
+	}
+	s.publishPrivateResourceAccessUpdated(ctx, access)
+	return nil
+}
+
+func (s *Server) publishPrivateResourceAccessUpdated(ctx context.Context, access store.PrivateResourceAccess) {
+	s.publishNotification(ctx, access.OrganizationID, privateResourceAccessUpdatedNotification, map[string]any{
 		"private_resource_access_id": access.Meta.ID.String(),
 		"private_resource_id":        access.PrivateResourceID.String(),
 		"principal_type":             string(access.PrincipalType),
@@ -57,26 +88,37 @@ func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateR
 func (s *Server) publishTunnelConnectivity(ctx context.Context, credential store.TunnelCredential) {
 	if credential.Connectivity == store.TunnelConnectivityOnline {
 		event := &networksv1.TunnelOnlineEvent{TunnelCredentialId: credential.Meta.ID.String(), NetworkId: credential.NetworkID.String()}
-		s.publishProtoEvent(ctx, tunnelOnlineSubject, eventMessageID(tunnelOnlineSubject+"-"+credential.Meta.ID.String()), event)
-		s.publishNotification(ctx, credential.OrganizationID, tunnelOnlineSubject, map[string]any{"tunnel_credential_id": credential.Meta.ID.String(), "network_id": credential.NetworkID.String()})
+		_ = s.publishProtoEvent(ctx, tunnelOnlineSubject, newEventEnvelope(s.now(), event), event)
+		s.publishTunnelStatusChanged(ctx, credential)
 		return
 	}
 	event := &networksv1.TunnelOfflineEvent{TunnelCredentialId: credential.Meta.ID.String(), NetworkId: credential.NetworkID.String()}
-	s.publishProtoEvent(ctx, tunnelOfflineSubject, eventMessageID(tunnelOfflineSubject+"-"+credential.Meta.ID.String()), event)
-	s.publishNotification(ctx, credential.OrganizationID, tunnelOfflineSubject, map[string]any{"tunnel_credential_id": credential.Meta.ID.String(), "network_id": credential.NetworkID.String()})
+	_ = s.publishProtoEvent(ctx, tunnelOfflineSubject, newEventEnvelope(s.now(), event), event)
+	s.publishTunnelStatusChanged(ctx, credential)
 }
 
-func (s *Server) publishProtoEvent(ctx context.Context, subject string, messageID string, message proto.Message) {
+func (s *Server) publishTunnelStatusChanged(ctx context.Context, credential store.TunnelCredential) {
+	s.publishNotification(ctx, credential.OrganizationID, tunnelStatusChangedNotification, map[string]any{
+		"tunnel_credential_id": credential.Meta.ID.String(),
+		"network_id":           credential.NetworkID.String(),
+		"connectivity":         string(credential.Connectivity),
+		"enrollment_state":     string(credential.EnrollmentState),
+	})
+}
+
+func (s *Server) publishProtoEvent(ctx context.Context, subject string, envelope EventEnvelope, message proto.Message) error {
 	if s.eventPublisher == nil {
-		return
+		return nil
 	}
 	payload, err := proto.Marshal(message)
 	if err != nil {
 		panic(fmt.Sprintf("marshal %s: %v", subject, err))
 	}
-	if err := s.eventPublisher.Publish(ctx, subject, messageID, payload); err != nil {
+	if err := s.eventPublisher.Publish(ctx, subject, envelope, payload); err != nil {
 		log.Printf("publish %s failed: %v", subject, err)
+		return err
 	}
+	return nil
 }
 
 func (s *Server) publishNotification(ctx context.Context, organizationID fmt.Stringer, event string, payload map[string]any) {

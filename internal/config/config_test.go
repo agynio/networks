@@ -36,10 +36,10 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.NATSURL != "" {
 		t.Fatalf("expected empty nats url, got %q", cfg.NATSURL)
 	}
-	if cfg.TunnelLivenessInterval != time.Minute {
+	if cfg.TunnelLivenessInterval != 30*time.Second {
 		t.Fatalf("expected default liveness interval, got %s", cfg.TunnelLivenessInterval)
 	}
-	if cfg.ReconciliationInterval != 5*time.Minute {
+	if cfg.ReconciliationInterval != time.Minute {
 		t.Fatalf("expected default reconciliation interval, got %s", cfg.ReconciliationInterval)
 	}
 }
