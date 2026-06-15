@@ -43,11 +43,14 @@ func TestTunnelLivenessUpdatesStateAndPublishesTransition(t *testing.T) {
 	if len(events.messages) != 1 || events.messages[0].subject != tunnelOnlineSubject {
 		t.Fatalf("expected online event, got %#v", events.messages)
 	}
-	if events.messages[0].messageID == credential.Meta.ID.String() {
+	if events.messages[0].envelope.EventID == credential.Meta.ID.String() {
 		t.Fatalf("expected event occurrence message id, got stable entity id")
 	}
-	if len(notifications.requests) != 1 || notifications.requests[0].GetEvent() != tunnelOnlineSubject {
-		t.Fatalf("expected online notification")
+	if events.messages[0].envelope.Schema != "agynio.api.networks.v1.TunnelOnlineEvent" {
+		t.Fatalf("expected schema header value, got %s", events.messages[0].envelope.Schema)
+	}
+	if len(notifications.requests) != 1 || notifications.requests[0].GetEvent() != tunnelStatusChangedNotification {
+		t.Fatalf("expected tunnel status notification")
 	}
 }
 
@@ -321,9 +324,9 @@ func (f *fakeAcks) term(...nats.AckOpt) error {
 }
 
 type publishedMessage struct {
-	subject   string
-	messageID string
-	payload   []byte
+	subject  string
+	envelope EventEnvelope
+	payload  []byte
 }
 
 type fakeEventPublisher struct {
@@ -331,8 +334,8 @@ type fakeEventPublisher struct {
 	err      error
 }
 
-func (f *fakeEventPublisher) Publish(_ context.Context, subject string, messageID string, payload []byte) error {
-	f.messages = append(f.messages, publishedMessage{subject: subject, messageID: messageID, payload: payload})
+func (f *fakeEventPublisher) Publish(_ context.Context, subject string, envelope EventEnvelope, payload []byte) error {
+	f.messages = append(f.messages, publishedMessage{subject: subject, envelope: envelope, payload: payload})
 	return f.err
 }
 

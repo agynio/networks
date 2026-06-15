@@ -61,11 +61,11 @@ func FromEnv() (Config, error) {
 	}
 	cfg.NATSURL = os.Getenv("NATS_URL")
 	var err error
-	cfg.TunnelLivenessInterval, err = durationFromEnv("TUNNEL_LIVENESS_INTERVAL", time.Minute)
+	cfg.TunnelLivenessInterval, err = durationFromEnv("TUNNEL_LIVENESS_INTERVAL", 30*time.Second)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.ReconciliationInterval, err = durationFromEnv("RECONCILIATION_INTERVAL", 5*time.Minute)
+	cfg.ReconciliationInterval, err = durationFromEnv("RECONCILIATION_INTERVAL", time.Minute)
 	if err != nil {
 		return Config{}, err
 	}

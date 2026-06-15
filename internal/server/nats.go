@@ -9,16 +9,27 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const (
 	groupsDeletedSubject = "agyn.groups.group.deleted"
 	natsHeaderMessageID  = "Nats-Msg-Id"
-	natsHeaderSource     = "Agyn-Source"
+	natsHeaderEventID    = "Agyn-Event-Id"
+	natsHeaderOccurredAt = "Agyn-Occurred-At"
+	natsHeaderProducer   = "Agyn-Producer"
+	natsHeaderSchema     = "Agyn-Schema"
+	natsProducer         = "networks-service"
 )
 
 type EventPublisher = eventPublisher
 type NATSConn = *nats.Conn
+
+type EventEnvelope struct {
+	EventID    string
+	OccurredAt time.Time
+	Schema     protoreflect.FullName
+}
 
 type NATSPublisher struct{ jetStream nats.JetStreamContext }
 
@@ -32,11 +43,14 @@ func NewNATSPublisher(conn *nats.Conn) (*NATSPublisher, error) {
 	return &NATSPublisher{jetStream: jetStream}, nil
 }
 
-func (p *NATSPublisher) Publish(_ context.Context, subject string, messageID string, payload []byte) error {
+func (p *NATSPublisher) Publish(_ context.Context, subject string, envelope EventEnvelope, payload []byte) error {
 	message := nats.NewMsg(subject)
 	message.Data = payload
-	message.Header.Set(natsHeaderMessageID, messageID)
-	message.Header.Set(natsHeaderSource, networksEventSource)
+	message.Header.Set(natsHeaderMessageID, envelope.EventID)
+	message.Header.Set(natsHeaderEventID, envelope.EventID)
+	message.Header.Set(natsHeaderOccurredAt, envelope.OccurredAt.UTC().Format(time.RFC3339Nano))
+	message.Header.Set(natsHeaderProducer, natsProducer)
+	message.Header.Set(natsHeaderSchema, string(envelope.Schema))
 	_, err := p.jetStream.PublishMsg(message)
 	return err
 }
@@ -79,6 +93,6 @@ func (s *Server) handleGroupDeletedMessage(ctx context.Context, payload []byte, 
 	}
 }
 
-func eventMessageID(prefix string) string {
-	return prefix + "-" + uuid.NewString() + "-" + time.Now().UTC().Format("20060102150405")
+func newEventEnvelope(occurredAt time.Time, message proto.Message) EventEnvelope {
+	return EventEnvelope{EventID: uuid.NewString(), OccurredAt: occurredAt, Schema: message.ProtoReflect().Descriptor().FullName()}
 }

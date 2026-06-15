@@ -73,7 +73,7 @@ type notificationsClient interface {
 }
 
 type eventPublisher interface {
-	Publish(context.Context, string, string, []byte) error
+	Publish(context.Context, string, EventEnvelope, []byte) error
 }
 
 type Server struct {
@@ -119,6 +119,7 @@ func (s *Server) CreateNetwork(ctx context.Context, request *networksv1.CreateNe
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishNetworkUpdated(ctx, network)
 	return &networksv1.CreateNetworkResponse{Network: convertNetwork(network)}, nil
 }
 
@@ -188,6 +189,7 @@ func (s *Server) UpdateNetwork(ctx context.Context, request *networksv1.UpdateNe
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishNetworkUpdated(ctx, network)
 	return &networksv1.UpdateNetworkResponse{Network: convertNetwork(network)}, nil
 }
 
@@ -221,6 +223,7 @@ func (s *Server) DeleteNetwork(ctx context.Context, request *networksv1.DeleteNe
 	if err := s.store.DeleteNetwork(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishNetworkUpdated(ctx, network)
 	return &networksv1.DeleteNetworkResponse{}, nil
 }
 
@@ -250,6 +253,7 @@ func (s *Server) CreateTunnelCredential(ctx context.Context, request *networksv1
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishTunnelCredentialUpdated(ctx, credential)
 	return &networksv1.CreateTunnelCredentialResponse{TunnelCredential: convertTunnelCredential(credential), EnrollmentJwt: enrollmentJWT}, nil
 }
 
@@ -316,6 +320,7 @@ func (s *Server) DeleteTunnelCredential(ctx context.Context, request *networksv1
 	if err := s.store.DeleteTunnelCredential(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishTunnelCredentialUpdated(ctx, credential)
 	return &networksv1.DeleteTunnelCredentialResponse{}, nil
 }
 
@@ -344,6 +349,7 @@ func (s *Server) CreatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.CreatePrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
 }
 
@@ -440,6 +446,7 @@ func (s *Server) UpdatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.UpdatePrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
 }
 
@@ -478,6 +485,7 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 	if err := s.store.DeletePrivateResource(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.DeletePrivateResourceResponse{}, nil
 }
 

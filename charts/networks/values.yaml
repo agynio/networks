@@ -78,21 +78,23 @@ env:
         name: agyn-platform-database-urls
         key: networks
   - name: DEPENDENCY_CLIENTS_ENABLED
-    value: "false"
+    value: "true"
   - name: AUTHORIZATION_GRPC_TARGET
     value: "authorization:50051"
   - name: ZITI_MANAGEMENT_GRPC_TARGET
     value: "ziti-management:50051"
+  - name: IDENTITY_GRPC_TARGET
+    value: "identity:50051"
   - name: GROUPS_GRPC_TARGET
     value: "groups:50051"
   - name: NOTIFICATIONS_GRPC_TARGET
     value: "notifications:50051"
   - name: NATS_URL
-    value: ""
+    value: "nats://nats:4222"
   - name: TUNNEL_LIVENESS_INTERVAL
-    value: "1m"
+    value: "30s"
   - name: RECONCILIATION_INTERVAL
-    value: "5m"
+    value: "60s"
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""
