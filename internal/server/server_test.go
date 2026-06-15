@@ -21,7 +21,7 @@ import (
 func TestCreateNetworkRequiresOwner(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	_, err := server.CreateNetwork(callerContext(callerID), &networksv1.CreateNetworkRequest{OrganizationId: orgID.String(), Name: "corp"})
@@ -40,7 +40,7 @@ func TestCreateNetworkRequiresOwner(t *testing.T) {
 func TestCreatePrivateResourceValidatesPortsAndHost(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	network := store.mustCreateNetwork(orgID)
@@ -72,7 +72,7 @@ func TestCreatePrivateResourceValidatesPortsAndHost(t *testing.T) {
 func TestCreatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	network := store.mustCreateNetwork(orgID)
@@ -97,7 +97,7 @@ func TestCreatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
 func TestUpdatePrivateResourcePreservesPortMappingOrder(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
-	server := NewWithClients(store, authz, nil, nil)
+	server := NewWithClients(store, authz, nil, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	resource := store.mustCreatePrivateResource(store.mustCreateNetwork(orgID))
@@ -119,7 +119,7 @@ func TestCreatePrivateResourceAccessRejectsCrossOrgUser(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	identity := &fakeIdentityClient{types: map[string]identityv1.IdentityType{}}
-	server := NewWithClients(store, authz, identity, nil)
+	server := NewWithClients(store, authz, identity, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	principalID := uuid.New()
@@ -139,7 +139,7 @@ func TestCreatePrivateResourceAccessAgentUsesCanEditConfig(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	identity := &fakeIdentityClient{types: map[string]identityv1.IdentityType{}}
-	server := NewWithClients(store, authz, identity, nil)
+	server := NewWithClients(store, authz, identity, nil, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	agentID := uuid.New()
@@ -169,7 +169,7 @@ func TestCreatePrivateResourceAccessRejectsCrossOrgGroup(t *testing.T) {
 	store := newFakeStore()
 	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
 	groups := &fakeGroupsClient{groups: map[string]*groupsv1.Group{}}
-	server := NewWithClients(store, authz, nil, groups)
+	server := NewWithClients(store, authz, nil, groups, nil)
 	callerID := uuid.New()
 	orgID := uuid.New()
 	otherOrgID := uuid.New()
@@ -267,6 +267,14 @@ func (f *fakeStore) mustCreatePrivateResource(network store.Network) store.Priva
 	return resource
 }
 
+func (f *fakeStore) mustCreateTunnelCredential(network store.Network) store.TunnelCredential {
+	credential, err := f.CreateTunnelCredential(context.Background(), store.CreateTunnelCredentialInput{ID: uuid.New(), NetworkID: network.Meta.ID})
+	if err != nil {
+		panic(err)
+	}
+	return credential
+}
+
 func fakeMeta(id uuid.UUID) store.EntityMeta {
 	now := time.Now().UTC()
 	return store.EntityMeta{ID: id, CreatedAt: now, UpdatedAt: now}
@@ -309,7 +317,7 @@ func (f *fakeStore) DeleteNetwork(_ context.Context, id uuid.UUID) error {
 
 func (f *fakeStore) CreateTunnelCredential(_ context.Context, input store.CreateTunnelCredentialInput) (store.TunnelCredential, error) {
 	network := f.networks[input.NetworkID]
-	credential := store.TunnelCredential{Meta: fakeMeta(input.ID), NetworkID: input.NetworkID, OrganizationID: network.OrganizationID, EnrollmentState: store.TunnelEnrollmentStatePending, Connectivity: store.TunnelConnectivityOffline, ProvisioningState: store.ProvisioningStateActive}
+	credential := store.TunnelCredential{Meta: fakeMeta(input.ID), NetworkID: input.NetworkID, OrganizationID: network.OrganizationID, OpenZitiIdentityID: input.OpenZitiIdentityID, EnrollmentJWTRevealed: input.EnrollmentJWTRevealed, EnrollmentJWTExpiresAt: input.EnrollmentJWTExpiresAt, EnrollmentState: store.TunnelEnrollmentStatePending, Connectivity: store.TunnelConnectivityOffline, ProvisioningState: input.ProvisioningState}
 	f.credentials[input.ID] = credential
 	return credential, nil
 }
@@ -370,6 +378,131 @@ func (f *fakeStore) GetPrivateResourceAccess(_ context.Context, id uuid.UUID) (s
 func (f *fakeStore) ListPrivateResourceAccess(context.Context, store.ListPrivateResourceAccessFilter, int32, *store.PageCursor) ([]store.PrivateResourceAccess, *store.PageCursor, error) {
 	return nil, nil, nil
 }
-func (f *fakeStore) DeletePrivateResourceAccess(context.Context, uuid.UUID) error { return nil }
+func (f *fakeStore) DeletePrivateResourceAccess(_ context.Context, id uuid.UUID) error {
+	delete(f.accesses, id)
+	return nil
+}
+
+func (f *fakeStore) UpdateNetworkProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiBindPolicyID string) (store.Network, error) {
+	network := f.networks[id]
+	network.ProvisioningState = state
+	network.OpenZitiBindPolicyID = openZitiBindPolicyID
+	f.networks[id] = network
+	return network, nil
+}
+
+func (f *fakeStore) UpdateTunnelCredentialProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiIdentityID string, enrollmentJWTRevealed bool, enrollmentJWTExpiresAt *time.Time) (store.TunnelCredential, error) {
+	credential := f.credentials[id]
+	credential.ProvisioningState = state
+	credential.OpenZitiIdentityID = openZitiIdentityID
+	credential.EnrollmentJWTRevealed = enrollmentJWTRevealed
+	credential.EnrollmentJWTExpiresAt = enrollmentJWTExpiresAt
+	f.credentials[id] = credential
+	return credential, nil
+}
+
+func (f *fakeStore) UpdatePrivateResourceProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiServiceID string) (store.PrivateResource, error) {
+	resource := f.resources[id]
+	resource.ProvisioningState = state
+	resource.OpenZitiServiceID = openZitiServiceID
+	f.resources[id] = resource
+	return resource, nil
+}
+
+func (f *fakeStore) UpdatePrivateResourceAccessProvisioning(_ context.Context, id uuid.UUID, state store.ProvisioningState, openZitiDialPolicyID string) (store.PrivateResourceAccess, error) {
+	access := f.accesses[id]
+	access.ProvisioningState = state
+	access.OpenZitiDialPolicyID = openZitiDialPolicyID
+	f.accesses[id] = access
+	return access, nil
+}
 
 var _ Store = (*fakeStore)(nil)
+
+func (f *fakeStore) ListAllNetworks(context.Context) ([]store.Network, error) {
+	values := make([]store.Network, 0, len(f.networks))
+	for _, value := range f.networks {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllTunnelCredentials(context.Context) ([]store.TunnelCredential, error) {
+	values := make([]store.TunnelCredential, 0, len(f.credentials))
+	for _, value := range f.credentials {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) UpdateTunnelCredentialLiveness(_ context.Context, input store.UpdateTunnelCredentialLivenessInput) (store.TunnelCredential, error) {
+	credential := f.credentials[input.ID]
+	credential.EnrollmentState = input.EnrollmentState
+	credential.Connectivity = input.Connectivity
+	credential.EnrolledAt = input.EnrolledAt
+	credential.LastSeenAt = input.LastSeenAt
+	f.credentials[input.ID] = credential
+	return credential, nil
+}
+
+func (f *fakeStore) ListAllPrivateResources(context.Context) ([]store.PrivateResource, error) {
+	values := make([]store.PrivateResource, 0, len(f.resources))
+	for _, value := range f.resources {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllPrivateResourceAccess(context.Context) ([]store.PrivateResourceAccess, error) {
+	values := make([]store.PrivateResourceAccess, 0, len(f.accesses))
+	for _, value := range f.accesses {
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListPrivateResourceAccessByGroupID(_ context.Context, groupID uuid.UUID) ([]store.PrivateResourceAccess, error) {
+	values := []store.PrivateResourceAccess{}
+	for _, value := range f.accesses {
+		if value.PrincipalType == store.PrincipalTypeGroup && value.PrincipalID == groupID {
+			values = append(values, value)
+		}
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllTunnelCredentialsFiltered(_ context.Context, filter store.ListTunnelCredentialsFilter) ([]store.TunnelCredential, error) {
+	values := []store.TunnelCredential{}
+	for _, value := range f.credentials {
+		if filter.NetworkID != nil && value.NetworkID != *filter.NetworkID {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllPrivateResourcesFiltered(_ context.Context, filter store.ListPrivateResourcesFilterAll) ([]store.PrivateResource, error) {
+	values := []store.PrivateResource{}
+	for _, value := range f.resources {
+		if filter.NetworkID != nil && value.NetworkID != *filter.NetworkID {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllPrivateResourceAccessFiltered(_ context.Context, filter store.ListPrivateResourceAccessFilterAll) ([]store.PrivateResourceAccess, error) {
+	values := []store.PrivateResourceAccess{}
+	for _, value := range f.accesses {
+		if filter.PrivateResourceID != nil && value.PrivateResourceID != *filter.PrivateResourceID {
+			continue
+		}
+		if filter.NetworkID != nil && value.NetworkID != *filter.NetworkID {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}

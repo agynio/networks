@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
 	networksv1 "github.com/agynio/networks/.gen/go/agynio/api/networks/v1"
+	notificationsv1 "github.com/agynio/networks/.gen/go/agynio/api/notifications/v1"
+	zitimgmtv1 "github.com/agynio/networks/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/networks/internal/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -20,23 +23,36 @@ import (
 )
 
 type Store interface {
+	UpdateNetworkProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string) (store.Network, error)
+	UpdateTunnelCredentialProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string, bool, *time.Time) (store.TunnelCredential, error)
+	UpdateTunnelCredentialLiveness(context.Context, store.UpdateTunnelCredentialLivenessInput) (store.TunnelCredential, error)
+	UpdatePrivateResourceProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string) (store.PrivateResource, error)
+	UpdatePrivateResourceAccessProvisioning(context.Context, uuid.UUID, store.ProvisioningState, string) (store.PrivateResourceAccess, error)
 	CreateNetwork(context.Context, store.CreateNetworkInput) (store.Network, error)
 	GetNetwork(context.Context, uuid.UUID) (store.Network, error)
 	ListNetworks(context.Context, uuid.UUID, int32, *store.PageCursor) ([]store.Network, *store.PageCursor, error)
+	ListAllNetworks(context.Context) ([]store.Network, error)
 	UpdateNetwork(context.Context, store.UpdateNetworkInput) (store.Network, error)
 	DeleteNetwork(context.Context, uuid.UUID) error
 	CreateTunnelCredential(context.Context, store.CreateTunnelCredentialInput) (store.TunnelCredential, error)
 	GetTunnelCredential(context.Context, uuid.UUID) (store.TunnelCredential, error)
 	ListTunnelCredentials(context.Context, uuid.UUID, int32, *store.PageCursor) ([]store.TunnelCredential, *store.PageCursor, error)
+	ListAllTunnelCredentials(context.Context) ([]store.TunnelCredential, error)
+	ListAllTunnelCredentialsFiltered(context.Context, store.ListTunnelCredentialsFilter) ([]store.TunnelCredential, error)
 	DeleteTunnelCredential(context.Context, uuid.UUID) error
 	CreatePrivateResource(context.Context, store.CreatePrivateResourceInput) (store.PrivateResource, error)
 	GetPrivateResource(context.Context, uuid.UUID) (store.PrivateResource, error)
 	ListPrivateResources(context.Context, store.ListPrivateResourcesFilter, int32, *store.PageCursor) ([]store.PrivateResource, *store.PageCursor, error)
+	ListAllPrivateResources(context.Context) ([]store.PrivateResource, error)
+	ListAllPrivateResourcesFiltered(context.Context, store.ListPrivateResourcesFilterAll) ([]store.PrivateResource, error)
 	UpdatePrivateResource(context.Context, store.UpdatePrivateResourceInput) (store.PrivateResource, error)
 	DeletePrivateResource(context.Context, uuid.UUID) error
 	CreatePrivateResourceAccess(context.Context, store.CreatePrivateResourceAccessInput) (store.PrivateResourceAccess, error)
 	GetPrivateResourceAccess(context.Context, uuid.UUID) (store.PrivateResourceAccess, error)
 	ListPrivateResourceAccess(context.Context, store.ListPrivateResourceAccessFilter, int32, *store.PageCursor) ([]store.PrivateResourceAccess, *store.PageCursor, error)
+	ListAllPrivateResourceAccess(context.Context) ([]store.PrivateResourceAccess, error)
+	ListAllPrivateResourceAccessFiltered(context.Context, store.ListPrivateResourceAccessFilterAll) ([]store.PrivateResourceAccess, error)
+	ListPrivateResourceAccessByGroupID(context.Context, uuid.UUID) ([]store.PrivateResourceAccess, error)
 	DeletePrivateResourceAccess(context.Context, uuid.UUID) error
 }
 
@@ -52,17 +68,33 @@ type groupsClient interface {
 	GetGroup(context.Context, *groupsv1.GetGroupRequest, ...grpc.CallOption) (*groupsv1.GetGroupResponse, error)
 }
 
-type Server struct {
-	store               Store
-	authorizationClient authorizationClient
-	identityClient      identityClient
-	groupsClient        groupsClient
+type notificationsClient interface {
+	Publish(context.Context, *notificationsv1.PublishRequest, ...grpc.CallOption) (*notificationsv1.PublishResponse, error)
 }
 
-func New(store Store) *Server { return NewWithClients(store, nil, nil, nil) }
+type eventPublisher interface {
+	Publish(context.Context, string, string, []byte) error
+}
 
-func NewWithClients(store Store, authorizationClient authorizationClient, identityClient identityClient, groupsClient groupsClient) *Server {
-	return &Server{store: store, authorizationClient: authorizationClient, identityClient: identityClient, groupsClient: groupsClient}
+type Server struct {
+	store                Store
+	authorizationClient  authorizationClient
+	identityClient       identityClient
+	groupsClient         groupsClient
+	zitiManagementClient zitiManagementClient
+	notificationsClient  notificationsClient
+	eventPublisher       eventPublisher
+	now                  func() time.Time
+}
+
+func New(store Store) *Server { return NewWithClients(store, nil, nil, nil, nil) }
+
+func NewWithClients(store Store, authorizationClient authorizationClient, identityClient identityClient, groupsClient groupsClient, zitiManagementClient zitiManagementClient) *Server {
+	return NewWithDependencies(store, authorizationClient, identityClient, groupsClient, zitiManagementClient, nil, nil)
+}
+
+func NewWithDependencies(store Store, authorizationClient authorizationClient, identityClient identityClient, groupsClient groupsClient, zitiManagementClient zitiManagementClient, notificationsClient notificationsClient, eventPublisher eventPublisher) *Server {
+	return &Server{store: store, authorizationClient: authorizationClient, identityClient: identityClient, groupsClient: groupsClient, zitiManagementClient: zitiManagementClient, notificationsClient: notificationsClient, eventPublisher: eventPublisher, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Server) CreateNetwork(ctx context.Context, request *networksv1.CreateNetworkRequest) (*networksv1.CreateNetworkResponse, error) {
@@ -77,7 +109,13 @@ func (s *Server) CreateNetwork(ctx context.Context, request *networksv1.CreateNe
 	if err := validateName(name); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid name: %v", err)
 	}
-	network, err := s.store.CreateNetwork(ctx, store.CreateNetworkInput{ID: uuid.New(), OrganizationID: organizationID, Name: name, Description: request.GetDescription()})
+	networkID := uuid.New()
+	network, err := s.store.CreateNetwork(ctx, store.CreateNetworkInput{ID: networkID, OrganizationID: organizationID, Name: name, Description: request.GetDescription()})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	provisioning := s.provisionNetworkBindPolicy(ctx, networkID)
+	network, err = s.store.UpdateNetworkProvisioning(ctx, networkID, provisioning.State, provisioning.BindPolicyID)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -165,6 +203,21 @@ func (s *Server) DeleteNetwork(ctx context.Context, request *networksv1.DeleteNe
 	if err := s.requireOrganizationOwner(ctx, network.OrganizationID); err != nil {
 		return nil, err
 	}
+	credentials, err := s.store.ListAllTunnelCredentialsFiltered(ctx, store.ListTunnelCredentialsFilter{NetworkID: &id})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	resources, err := s.store.ListAllPrivateResourcesFiltered(ctx, store.ListPrivateResourcesFilterAll{NetworkID: &id})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{NetworkID: &id})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	if err := s.deleteNetworkZitiResources(ctx, network, credentials, resources, accesses); err != nil {
+		return nil, status.Errorf(codes.Internal, "delete OpenZiti resources: %v", err)
+	}
 	if err := s.store.DeleteNetwork(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
@@ -183,11 +236,21 @@ func (s *Server) CreateTunnelCredential(ctx context.Context, request *networksv1
 	if err := s.requireOrganizationOwner(ctx, network.OrganizationID); err != nil {
 		return nil, err
 	}
-	credential, err := s.store.CreateTunnelCredential(ctx, store.CreateTunnelCredentialInput{ID: uuid.New(), NetworkID: networkID, EnrollmentJWTRevealed: false})
+	credentialID := uuid.New()
+	zitiIdentityID, enrollmentJWT, enrollmentResponse, err := s.provisionTunnelIdentity(ctx, networkID, credentialID)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "create OpenZiti tunnel identity: %v", err)
+	}
+	var expiresAt *time.Time
+	if enrollmentResponse != nil && enrollmentResponse.GetEnrollmentJwtExpiresAt() != nil {
+		value := enrollmentResponse.GetEnrollmentJwtExpiresAt().AsTime()
+		expiresAt = &value
+	}
+	credential, err := s.store.CreateTunnelCredential(ctx, store.CreateTunnelCredentialInput{ID: credentialID, NetworkID: networkID, OpenZitiIdentityID: zitiIdentityID, EnrollmentJWTRevealed: enrollmentJWT != "", EnrollmentJWTExpiresAt: expiresAt, ProvisioningState: store.ProvisioningStateActive})
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &networksv1.CreateTunnelCredentialResponse{TunnelCredential: convertTunnelCredential(credential)}, nil
+	return &networksv1.CreateTunnelCredentialResponse{TunnelCredential: convertTunnelCredential(credential), EnrollmentJwt: enrollmentJWT}, nil
 }
 
 func (s *Server) GetTunnelCredential(ctx context.Context, request *networksv1.GetTunnelCredentialRequest) (*networksv1.GetTunnelCredentialResponse, error) {
@@ -244,6 +307,12 @@ func (s *Server) DeleteTunnelCredential(ctx context.Context, request *networksv1
 	if err := s.requireOrganizationOwner(ctx, credential.OrganizationID); err != nil {
 		return nil, err
 	}
+	if s.zitiManagementClient != nil && credential.OpenZitiIdentityID != "" {
+		_, err := s.zitiManagementClient.DeleteTunnelIdentity(ctx, &zitimgmtv1.DeleteTunnelIdentityRequest{ZitiIdentityId: credential.OpenZitiIdentityID})
+		if ignoreMissing(nil, err) != nil {
+			return nil, status.Errorf(codes.Internal, "delete OpenZiti tunnel identity: %v", err)
+		}
+	}
 	if err := s.store.DeleteTunnelCredential(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
@@ -267,6 +336,11 @@ func (s *Server) CreatePrivateResource(ctx context.Context, request *networksv1.
 		return nil, err
 	}
 	resource, err := s.store.CreatePrivateResource(ctx, input)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	provisioning := s.provisionPrivateResource(ctx, resource)
+	resource, err = s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioning.State, provisioning.ServiceID)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -355,6 +429,17 @@ func (s *Server) UpdatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	provisioningState := s.updatePrivateResourceProvisioning(ctx, resource)
+	openZitiServiceID := resource.OpenZitiServiceID
+	if s.zitiManagementClient != nil && openZitiServiceID == "" {
+		provisioning := s.provisionPrivateResource(ctx, resource)
+		provisioningState = provisioning.State
+		openZitiServiceID = provisioning.ServiceID
+	}
+	resource, err = s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioningState, openZitiServiceID)
+	if err != nil {
+		return nil, toStatus(err)
+	}
 	return &networksv1.UpdatePrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
 }
 
@@ -369,6 +454,26 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 	}
 	if err := s.requireOrganizationOwner(ctx, resource.OrganizationID); err != nil {
 		return nil, err
+	}
+	if s.zitiManagementClient != nil {
+		accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{PrivateResourceID: &id})
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		for _, access := range accesses {
+			if access.OpenZitiDialPolicyID != "" {
+				_, err := s.zitiManagementClient.DeleteServicePolicy(ctx, &zitimgmtv1.DeleteServicePolicyRequest{ZitiServicePolicyId: access.OpenZitiDialPolicyID})
+				if ignoreMissing(nil, err) != nil {
+					return nil, status.Errorf(codes.Internal, "delete OpenZiti dial policy: %v", err)
+				}
+			}
+		}
+		if resource.OpenZitiServiceID != "" {
+			_, err := s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: resource.OpenZitiServiceID})
+			if ignoreMissing(nil, err) != nil {
+				return nil, status.Errorf(codes.Internal, "delete OpenZiti service: %v", err)
+			}
+		}
 	}
 	if err := s.store.DeletePrivateResource(ctx, id); err != nil {
 		return nil, toStatus(err)
@@ -403,6 +508,12 @@ func (s *Server) CreatePrivateResourceAccess(ctx context.Context, request *netwo
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	provisioning := s.provisionPrivateResourceAccess(ctx, access)
+	access, err = s.store.UpdatePrivateResourceAccessProvisioning(ctx, access.Meta.ID, provisioning.State, provisioning.DialPolicyID)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	s.publishAccessGranted(ctx, access)
 	return &networksv1.CreatePrivateResourceAccessResponse{PrivateResourceAccess: convertPrivateResourceAccess(access)}, nil
 }
 
@@ -418,9 +529,16 @@ func (s *Server) DeletePrivateResourceAccess(ctx context.Context, request *netwo
 	if err := s.requireAccessMutationAllowed(ctx, access.PrincipalType, access.PrincipalID, access.OrganizationID); err != nil {
 		return nil, err
 	}
+	if s.zitiManagementClient != nil && access.OpenZitiDialPolicyID != "" {
+		_, err := s.zitiManagementClient.DeleteServicePolicy(ctx, &zitimgmtv1.DeleteServicePolicyRequest{ZitiServicePolicyId: access.OpenZitiDialPolicyID})
+		if ignoreMissing(nil, err) != nil {
+			return nil, status.Errorf(codes.Internal, "delete OpenZiti dial policy: %v", err)
+		}
+	}
 	if err := s.store.DeletePrivateResourceAccess(ctx, id); err != nil {
 		return nil, toStatus(err)
 	}
+	s.publishAccessRevoked(ctx, access)
 	return &networksv1.DeletePrivateResourceAccessResponse{}, nil
 }
 

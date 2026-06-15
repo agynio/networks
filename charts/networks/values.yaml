@@ -89,6 +89,10 @@ env:
     value: "notifications:50051"
   - name: NATS_URL
     value: ""
+  - name: TUNNEL_LIVENESS_INTERVAL
+    value: "1m"
+  - name: RECONCILIATION_INTERVAL
+    value: "5m"
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""

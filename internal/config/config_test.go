@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestFromEnvDefaults(t *testing.T) {
 	setBaseEnv(t)
@@ -33,6 +36,12 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.NATSURL != "" {
 		t.Fatalf("expected empty nats url, got %q", cfg.NATSURL)
 	}
+	if cfg.TunnelLivenessInterval != time.Minute {
+		t.Fatalf("expected default liveness interval, got %s", cfg.TunnelLivenessInterval)
+	}
+	if cfg.ReconciliationInterval != 5*time.Minute {
+		t.Fatalf("expected default reconciliation interval, got %s", cfg.ReconciliationInterval)
+	}
 }
 
 func TestFromEnvRequiresDatabaseURL(t *testing.T) {
@@ -54,6 +63,8 @@ func TestFromEnvDependencyClientsEnabled(t *testing.T) {
 	t.Setenv("GROUPS_GRPC_TARGET", "groups.internal:50051")
 	t.Setenv("NOTIFICATIONS_GRPC_TARGET", "notifications.internal:50051")
 	t.Setenv("NATS_URL", "nats://nats:4222")
+	t.Setenv("TUNNEL_LIVENESS_INTERVAL", "30s")
+	t.Setenv("RECONCILIATION_INTERVAL", "2m")
 
 	cfg, err := FromEnv()
 	if err != nil {
@@ -67,6 +78,12 @@ func TestFromEnvDependencyClientsEnabled(t *testing.T) {
 	}
 	if cfg.NATSURL != "nats://nats:4222" {
 		t.Fatalf("expected nats url override, got %q", cfg.NATSURL)
+	}
+	if cfg.TunnelLivenessInterval != 30*time.Second {
+		t.Fatalf("expected liveness interval override, got %s", cfg.TunnelLivenessInterval)
+	}
+	if cfg.ReconciliationInterval != 2*time.Minute {
+		t.Fatalf("expected reconciliation interval override, got %s", cfg.ReconciliationInterval)
 	}
 }
 
@@ -90,4 +107,6 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("GROUPS_GRPC_TARGET", "")
 	t.Setenv("NOTIFICATIONS_GRPC_TARGET", "")
 	t.Setenv("NATS_URL", "")
+	t.Setenv("TUNNEL_LIVENESS_INTERVAL", "")
+	t.Setenv("RECONCILIATION_INTERVAL", "")
 }
