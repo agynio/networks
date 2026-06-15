@@ -12,6 +12,7 @@ import (
 	zitimgmtv1 "github.com/agynio/networks/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/networks/internal/store"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -42,8 +43,79 @@ func TestTunnelLivenessUpdatesStateAndPublishesTransition(t *testing.T) {
 	if len(events.messages) != 1 || events.messages[0].subject != tunnelOnlineSubject {
 		t.Fatalf("expected online event, got %#v", events.messages)
 	}
+	if events.messages[0].messageID == credential.Meta.ID.String() {
+		t.Fatalf("expected event occurrence message id, got stable entity id")
+	}
 	if len(notifications.requests) != 1 || notifications.requests[0].GetEvent() != tunnelOnlineSubject {
 		t.Fatalf("expected online notification")
+	}
+}
+
+func TestDeleteNetworkCleansAllDependents(t *testing.T) {
+	fakeStore := newFakeStore()
+	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
+	ziti := &fakeZitiManagementClient{}
+	server := NewWithClients(fakeStore, authz, nil, nil, ziti)
+	callerID := uuid.New()
+	orgID := uuid.New()
+	network := fakeStore.mustCreateNetwork(orgID)
+	authz.allow(identityObject(callerID), organizationOwnerRelation, organizationObject(orgID))
+
+	for i := 0; i < int(store.MaxListPageSize)+2; i++ {
+		credential := fakeStore.mustCreateTunnelCredential(network)
+		credential.OpenZitiIdentityID = uuid.NewString()
+		fakeStore.credentials[credential.Meta.ID] = credential
+		resource := fakeStore.mustCreatePrivateResource(network)
+		resource.OpenZitiServiceID = uuid.NewString()
+		fakeStore.resources[resource.Meta.ID] = resource
+		access, err := fakeStore.CreatePrivateResourceAccess(context.Background(), store.CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resource.Meta.ID, PrincipalType: store.PrincipalTypeUser, PrincipalID: uuid.New()})
+		if err != nil {
+			t.Fatalf("CreatePrivateResourceAccess: %v", err)
+		}
+		access.OpenZitiDialPolicyID = uuid.NewString()
+		fakeStore.accesses[access.Meta.ID] = access
+	}
+
+	if _, err := server.DeleteNetwork(callerContext(callerID), &networksv1.DeleteNetworkRequest{Id: network.Meta.ID.String()}); err != nil {
+		t.Fatalf("DeleteNetwork: %v", err)
+	}
+	if len(ziti.deletedTunnelIdentity) != int(store.MaxListPageSize)+2 {
+		t.Fatalf("expected all tunnel identities deleted, got %d", len(ziti.deletedTunnelIdentity))
+	}
+	if len(ziti.deletedServices) != int(store.MaxListPageSize)+2 {
+		t.Fatalf("expected all services deleted, got %d", len(ziti.deletedServices))
+	}
+	if len(ziti.deletedServicePolicies) != int(store.MaxListPageSize)+2 {
+		t.Fatalf("expected all access policies deleted, got %d", len(ziti.deletedServicePolicies))
+	}
+}
+
+func TestDeletePrivateResourceCleansAllAccessPolicies(t *testing.T) {
+	fakeStore := newFakeStore()
+	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
+	ziti := &fakeZitiManagementClient{}
+	server := NewWithClients(fakeStore, authz, nil, nil, ziti)
+	callerID := uuid.New()
+	orgID := uuid.New()
+	resource := fakeStore.mustCreatePrivateResource(fakeStore.mustCreateNetwork(orgID))
+	resource.OpenZitiServiceID = "service"
+	fakeStore.resources[resource.Meta.ID] = resource
+	authz.allow(identityObject(callerID), organizationOwnerRelation, organizationObject(orgID))
+
+	for i := 0; i < int(store.MaxListPageSize)+2; i++ {
+		access, err := fakeStore.CreatePrivateResourceAccess(context.Background(), store.CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resource.Meta.ID, PrincipalType: store.PrincipalTypeUser, PrincipalID: uuid.New()})
+		if err != nil {
+			t.Fatalf("CreatePrivateResourceAccess: %v", err)
+		}
+		access.OpenZitiDialPolicyID = uuid.NewString()
+		fakeStore.accesses[access.Meta.ID] = access
+	}
+
+	if _, err := server.DeletePrivateResource(callerContext(callerID), &networksv1.DeletePrivateResourceRequest{Id: resource.Meta.ID.String()}); err != nil {
+		t.Fatalf("DeletePrivateResource: %v", err)
+	}
+	if len(ziti.deletedServicePolicies) != int(store.MaxListPageSize)+2 {
+		t.Fatalf("expected all access policies deleted, got %d", len(ziti.deletedServicePolicies))
 	}
 }
 
@@ -127,6 +199,9 @@ func TestReconcileRecreatesMissingAndDeletesOrphans(t *testing.T) {
 	if err := server.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
+	if ziti.listedServices[0].GetTags()[managedByTagKey] != managedByNetworksService {
+		t.Fatalf("expected managed tag lookup to use created tag key")
+	}
 	if fakeStore.networks[network.Meta.ID].ProvisioningState != store.ProvisioningStateActive || fakeStore.networks[network.Meta.ID].OpenZitiBindPolicyID == "" {
 		t.Fatalf("expected network reconciled")
 	}
@@ -139,6 +214,50 @@ func TestReconcileRecreatesMissingAndDeletesOrphans(t *testing.T) {
 	assertStringSlice(t, ziti.deletedServices, []string{"orphan-service"})
 	assertStringSlice(t, ziti.deletedServicePolicies, []string{"orphan-policy"})
 	assertStringSlice(t, ziti.deletedTunnelIdentity, []string{"orphan-identity"})
+}
+
+func TestReconcileRecreatesActiveRowsWithMissingZitiIDs(t *testing.T) {
+	fakeStore := newFakeStore()
+	ziti := &fakeZitiManagementClient{serviceID: "service-new", servicePolicyID: "policy-new"}
+	server := NewWithDependencies(fakeStore, nil, nil, nil, ziti, nil, nil)
+	network := fakeStore.mustCreateNetwork(uuid.New())
+	network.OpenZitiBindPolicyID = "stale-bind-policy"
+	fakeStore.networks[network.Meta.ID] = network
+	resource := fakeStore.mustCreatePrivateResource(network)
+	resource.OpenZitiServiceID = "stale-service"
+	fakeStore.resources[resource.Meta.ID] = resource
+	access, err := fakeStore.CreatePrivateResourceAccess(context.Background(), store.CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resource.Meta.ID, PrincipalType: store.PrincipalTypeUser, PrincipalID: uuid.New()})
+	if err != nil {
+		t.Fatalf("CreatePrivateResourceAccess: %v", err)
+	}
+	access.OpenZitiDialPolicyID = "stale-dial-policy"
+	fakeStore.accesses[access.Meta.ID] = access
+
+	if err := server.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if fakeStore.networks[network.Meta.ID].OpenZitiBindPolicyID == "stale-bind-policy" {
+		t.Fatalf("expected stale bind policy replaced")
+	}
+	if fakeStore.resources[resource.Meta.ID].OpenZitiServiceID == "stale-service" {
+		t.Fatalf("expected stale service replaced")
+	}
+	if fakeStore.accesses[access.Meta.ID].OpenZitiDialPolicyID == "stale-dial-policy" {
+		t.Fatalf("expected stale dial policy replaced")
+	}
+	if len(ziti.deletedServices) != 0 || len(ziti.deletedServicePolicies) != 0 {
+		t.Fatalf("did not expect newly recreated resources deleted")
+	}
+	if len(ziti.createdServices) != 1 || len(ziti.createdServicePolicies) != 2 {
+		t.Fatalf("expected stale active rows recreated")
+	}
+}
+
+func TestManagedTagLookupMatchesCreatedTags(t *testing.T) {
+	tags := privateResourceTags(uuid.New(), uuid.New())
+	if managedTags()[managedByTagKey] != tags[managedByTagKey] {
+		t.Fatalf("managed tag lookup does not match creation tags")
+	}
 }
 
 func TestEventPublisherFireAndForgetFailure(t *testing.T) {
@@ -158,6 +277,47 @@ func TestEventPublisherFireAndForgetFailure(t *testing.T) {
 	if payload.GetPrivateResourceAccessId() != access.Meta.ID.String() {
 		t.Fatalf("unexpected event payload")
 	}
+}
+
+func TestGroupDeletedMessageAckPolicies(t *testing.T) {
+	fakeStore := newFakeStore()
+	server := NewWithDependencies(fakeStore, nil, nil, nil, nil, nil, nil)
+	acks := &fakeAcks{}
+	server.handleGroupDeletedMessage(context.Background(), []byte("not-proto"), acks.ack, acks.nak, acks.term)
+	if acks.termCount != 1 || acks.ackCount != 0 || acks.nakCount != 0 {
+		t.Fatalf("expected malformed event terminated, got %#v", acks)
+	}
+
+	acks = &fakeAcks{}
+	payload, err := proto.Marshal(&groupsv1.GroupDeletedEvent{GroupId: uuid.NewString()})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	server.handleGroupDeletedMessage(context.Background(), payload, acks.ack, acks.nak, acks.term)
+	if acks.ackCount != 1 || acks.nakCount != 0 || acks.termCount != 0 {
+		t.Fatalf("expected successful event acked, got %#v", acks)
+	}
+}
+
+type fakeAcks struct {
+	ackCount  int
+	nakCount  int
+	termCount int
+}
+
+func (f *fakeAcks) ack(...nats.AckOpt) error {
+	f.ackCount++
+	return nil
+}
+
+func (f *fakeAcks) nak(...nats.AckOpt) error {
+	f.nakCount++
+	return nil
+}
+
+func (f *fakeAcks) term(...nats.AckOpt) error {
+	f.termCount++
+	return nil
 }
 
 type publishedMessage struct {

@@ -190,7 +190,21 @@ func (s *Store) ListTunnelCredentials(ctx context.Context, networkID uuid.UUID, 
 }
 
 func (s *Store) ListAllTunnelCredentials(ctx context.Context) ([]TunnelCredential, error) {
-	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM tunnel_credentials JOIN networks ON networks.id = tunnel_credentials.network_id ORDER BY tunnel_credentials.id`, tunnelCredentialColumns))
+	return s.ListAllTunnelCredentialsFiltered(ctx, ListTunnelCredentialsFilter{})
+}
+
+func (s *Store) ListAllTunnelCredentialsFiltered(ctx context.Context, filter ListTunnelCredentialsFilter) ([]TunnelCredential, error) {
+	clauses := []string{}
+	args := []any{}
+	if filter.NetworkID != nil {
+		clauses, args = appendClause(clauses, args, "tunnel_credentials.network_id = $%d", *filter.NetworkID)
+	}
+	query := fmt.Sprintf(`SELECT %s FROM tunnel_credentials JOIN networks ON networks.id = tunnel_credentials.network_id`, tunnelCredentialColumns)
+	if len(clauses) > 0 {
+		query += " WHERE " + joinClauses(clauses)
+	}
+	query += " ORDER BY tunnel_credentials.id"
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +288,21 @@ func (s *Store) ListPrivateResources(ctx context.Context, filter ListPrivateReso
 }
 
 func (s *Store) ListAllPrivateResources(ctx context.Context) ([]PrivateResource, error) {
-	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resources ORDER BY id`, privateResourceColumns))
+	return s.ListAllPrivateResourcesFiltered(ctx, ListPrivateResourcesFilterAll{})
+}
+
+func (s *Store) ListAllPrivateResourcesFiltered(ctx context.Context, filter ListPrivateResourcesFilterAll) ([]PrivateResource, error) {
+	clauses := []string{}
+	args := []any{}
+	if filter.NetworkID != nil {
+		clauses, args = appendClause(clauses, args, "network_id = $%d", *filter.NetworkID)
+	}
+	query := fmt.Sprintf(`SELECT %s FROM private_resources`, privateResourceColumns)
+	if len(clauses) > 0 {
+		query += " WHERE " + joinClauses(clauses)
+	}
+	query += " ORDER BY id"
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +423,24 @@ func (s *Store) ListPrivateResourceAccess(ctx context.Context, filter ListPrivat
 }
 
 func (s *Store) ListAllPrivateResourceAccess(ctx context.Context) ([]PrivateResourceAccess, error) {
-	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id ORDER BY private_resource_accesses.id`, privateResourceAccessColumns))
+	return s.ListAllPrivateResourceAccessFiltered(ctx, ListPrivateResourceAccessFilterAll{})
+}
+
+func (s *Store) ListAllPrivateResourceAccessFiltered(ctx context.Context, filter ListPrivateResourceAccessFilterAll) ([]PrivateResourceAccess, error) {
+	clauses := []string{}
+	args := []any{}
+	if filter.PrivateResourceID != nil {
+		clauses, args = appendClause(clauses, args, "private_resource_accesses.private_resource_id = $%d", *filter.PrivateResourceID)
+	}
+	if filter.NetworkID != nil {
+		clauses, args = appendClause(clauses, args, "private_resources.network_id = $%d", *filter.NetworkID)
+	}
+	query := fmt.Sprintf(`SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id`, privateResourceAccessColumns)
+	if len(clauses) > 0 {
+		query += " WHERE " + joinClauses(clauses)
+	}
+	query += " ORDER BY private_resource_accesses.id"
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

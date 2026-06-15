@@ -38,17 +38,20 @@ type Store interface {
 	GetTunnelCredential(context.Context, uuid.UUID) (store.TunnelCredential, error)
 	ListTunnelCredentials(context.Context, uuid.UUID, int32, *store.PageCursor) ([]store.TunnelCredential, *store.PageCursor, error)
 	ListAllTunnelCredentials(context.Context) ([]store.TunnelCredential, error)
+	ListAllTunnelCredentialsFiltered(context.Context, store.ListTunnelCredentialsFilter) ([]store.TunnelCredential, error)
 	DeleteTunnelCredential(context.Context, uuid.UUID) error
 	CreatePrivateResource(context.Context, store.CreatePrivateResourceInput) (store.PrivateResource, error)
 	GetPrivateResource(context.Context, uuid.UUID) (store.PrivateResource, error)
 	ListPrivateResources(context.Context, store.ListPrivateResourcesFilter, int32, *store.PageCursor) ([]store.PrivateResource, *store.PageCursor, error)
 	ListAllPrivateResources(context.Context) ([]store.PrivateResource, error)
+	ListAllPrivateResourcesFiltered(context.Context, store.ListPrivateResourcesFilterAll) ([]store.PrivateResource, error)
 	UpdatePrivateResource(context.Context, store.UpdatePrivateResourceInput) (store.PrivateResource, error)
 	DeletePrivateResource(context.Context, uuid.UUID) error
 	CreatePrivateResourceAccess(context.Context, store.CreatePrivateResourceAccessInput) (store.PrivateResourceAccess, error)
 	GetPrivateResourceAccess(context.Context, uuid.UUID) (store.PrivateResourceAccess, error)
 	ListPrivateResourceAccess(context.Context, store.ListPrivateResourceAccessFilter, int32, *store.PageCursor) ([]store.PrivateResourceAccess, *store.PageCursor, error)
 	ListAllPrivateResourceAccess(context.Context) ([]store.PrivateResourceAccess, error)
+	ListAllPrivateResourceAccessFiltered(context.Context, store.ListPrivateResourceAccessFilterAll) ([]store.PrivateResourceAccess, error)
 	ListPrivateResourceAccessByGroupID(context.Context, uuid.UUID) ([]store.PrivateResourceAccess, error)
 	DeletePrivateResourceAccess(context.Context, uuid.UUID) error
 }
@@ -200,17 +203,15 @@ func (s *Server) DeleteNetwork(ctx context.Context, request *networksv1.DeleteNe
 	if err := s.requireOrganizationOwner(ctx, network.OrganizationID); err != nil {
 		return nil, err
 	}
-	credentials, _, err := s.store.ListTunnelCredentials(ctx, id, store.MaxListPageSize, nil)
+	credentials, err := s.store.ListAllTunnelCredentialsFiltered(ctx, store.ListTunnelCredentialsFilter{NetworkID: &id})
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	resourceFilter := store.ListPrivateResourcesFilter{NetworkID: &id}
-	resources, _, err := s.store.ListPrivateResources(ctx, resourceFilter, store.MaxListPageSize, nil)
+	resources, err := s.store.ListAllPrivateResourcesFiltered(ctx, store.ListPrivateResourcesFilterAll{NetworkID: &id})
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	accessFilter := store.ListPrivateResourceAccessFilter{NetworkID: &id}
-	accesses, _, err := s.store.ListPrivateResourceAccess(ctx, accessFilter, store.MaxListPageSize, nil)
+	accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{NetworkID: &id})
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -455,8 +456,7 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 		return nil, err
 	}
 	if s.zitiManagementClient != nil {
-		accessFilter := store.ListPrivateResourceAccessFilter{PrivateResourceID: &id}
-		accesses, _, err := s.store.ListPrivateResourceAccess(ctx, accessFilter, store.MaxListPageSize, nil)
+		accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{PrivateResourceID: &id})
 		if err != nil {
 			return nil, toStatus(err)
 		}

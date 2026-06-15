@@ -29,7 +29,7 @@ func (s *Server) publishAccessGranted(ctx context.Context, access store.PrivateR
 		PrincipalType:           convertPrincipalType(access.PrincipalType),
 		PrincipalId:             access.PrincipalID.String(),
 	}
-	s.publishProtoEvent(ctx, accessGrantedSubject, access.Meta.ID.String(), event)
+	s.publishProtoEvent(ctx, accessGrantedSubject, eventMessageID(accessGrantedSubject+"-"+access.Meta.ID.String()), event)
 	s.publishNotification(ctx, access.OrganizationID, accessGrantedSubject, map[string]any{
 		"private_resource_access_id": access.Meta.ID.String(),
 		"private_resource_id":        access.PrivateResourceID.String(),
@@ -45,7 +45,7 @@ func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateR
 		PrincipalType:           convertPrincipalType(access.PrincipalType),
 		PrincipalId:             access.PrincipalID.String(),
 	}
-	s.publishProtoEvent(ctx, accessRevokedSubject, access.Meta.ID.String(), event)
+	s.publishProtoEvent(ctx, accessRevokedSubject, eventMessageID(accessRevokedSubject+"-"+access.Meta.ID.String()), event)
 	s.publishNotification(ctx, access.OrganizationID, accessRevokedSubject, map[string]any{
 		"private_resource_access_id": access.Meta.ID.String(),
 		"private_resource_id":        access.PrivateResourceID.String(),
@@ -55,15 +55,14 @@ func (s *Server) publishAccessRevoked(ctx context.Context, access store.PrivateR
 }
 
 func (s *Server) publishTunnelConnectivity(ctx context.Context, credential store.TunnelCredential) {
-	messageID := credential.Meta.ID.String()
 	if credential.Connectivity == store.TunnelConnectivityOnline {
 		event := &networksv1.TunnelOnlineEvent{TunnelCredentialId: credential.Meta.ID.String(), NetworkId: credential.NetworkID.String()}
-		s.publishProtoEvent(ctx, tunnelOnlineSubject, messageID, event)
+		s.publishProtoEvent(ctx, tunnelOnlineSubject, eventMessageID(tunnelOnlineSubject+"-"+credential.Meta.ID.String()), event)
 		s.publishNotification(ctx, credential.OrganizationID, tunnelOnlineSubject, map[string]any{"tunnel_credential_id": credential.Meta.ID.String(), "network_id": credential.NetworkID.String()})
 		return
 	}
 	event := &networksv1.TunnelOfflineEvent{TunnelCredentialId: credential.Meta.ID.String(), NetworkId: credential.NetworkID.String()}
-	s.publishProtoEvent(ctx, tunnelOfflineSubject, messageID, event)
+	s.publishProtoEvent(ctx, tunnelOfflineSubject, eventMessageID(tunnelOfflineSubject+"-"+credential.Meta.ID.String()), event)
 	s.publishNotification(ctx, credential.OrganizationID, tunnelOfflineSubject, map[string]any{"tunnel_credential_id": credential.Meta.ID.String(), "network_id": credential.NetworkID.String()})
 }
 

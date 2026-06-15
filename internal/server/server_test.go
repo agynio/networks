@@ -470,3 +470,39 @@ func (f *fakeStore) ListPrivateResourceAccessByGroupID(_ context.Context, groupI
 	}
 	return values, nil
 }
+
+func (f *fakeStore) ListAllTunnelCredentialsFiltered(_ context.Context, filter store.ListTunnelCredentialsFilter) ([]store.TunnelCredential, error) {
+	values := []store.TunnelCredential{}
+	for _, value := range f.credentials {
+		if filter.NetworkID != nil && value.NetworkID != *filter.NetworkID {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllPrivateResourcesFiltered(_ context.Context, filter store.ListPrivateResourcesFilterAll) ([]store.PrivateResource, error) {
+	values := []store.PrivateResource{}
+	for _, value := range f.resources {
+		if filter.NetworkID != nil && value.NetworkID != *filter.NetworkID {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListAllPrivateResourceAccessFiltered(_ context.Context, filter store.ListPrivateResourceAccessFilterAll) ([]store.PrivateResourceAccess, error) {
+	values := []store.PrivateResourceAccess{}
+	for _, value := range f.accesses {
+		if filter.PrivateResourceID != nil && value.PrivateResourceID != *filter.PrivateResourceID {
+			continue
+		}
+		if filter.NetworkID != nil && value.NetworkID != *filter.NetworkID {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}

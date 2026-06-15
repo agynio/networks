@@ -283,7 +283,7 @@ func (f *fakeZitiManagementClient) CreateService(_ context.Context, request *zit
 	f.createdServices = append(f.createdServices, request)
 	serviceID := f.serviceID
 	if serviceID == "" {
-		serviceID = "service-id"
+		serviceID = "service-id-" + uuid.NewString()
 	}
 	return &zitimgmtv1.CreateServiceResponse{ZitiServiceId: serviceID}, f.createServiceErr
 }
@@ -302,7 +302,7 @@ func (f *fakeZitiManagementClient) CreateServicePolicy(_ context.Context, reques
 	f.createdServicePolicies = append(f.createdServicePolicies, request)
 	policyID := f.servicePolicyID
 	if policyID == "" {
-		policyID = "policy-id"
+		policyID = "policy-id-" + uuid.NewString()
 	}
 	return &zitimgmtv1.CreateServicePolicyResponse{ZitiServicePolicyId: policyID}, f.createPolicyErr
 }
@@ -342,6 +342,9 @@ func (f *fakeZitiManagementClient) GetIdentityLiveness(_ context.Context, _ *zit
 }
 
 func (f *fakeZitiManagementClient) ListServicesByTag(_ context.Context, _ *zitimgmtv1.ListServicesByTagRequest, _ ...grpc.CallOption) (*zitimgmtv1.ListServicesByTagResponse, error) {
+	for _, service := range f.listedServices {
+		service.Tags = managedTags()
+	}
 	return &zitimgmtv1.ListServicesByTagResponse{Services: f.listedServices}, nil
 }
 

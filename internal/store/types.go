@@ -169,6 +169,19 @@ type ListPrivateResourceAccessFilter struct {
 	PrincipalID       *uuid.UUID
 }
 
+type ListTunnelCredentialsFilter struct {
+	NetworkID *uuid.UUID
+}
+
+type ListPrivateResourcesFilterAll struct {
+	NetworkID *uuid.UUID
+}
+
+type ListPrivateResourceAccessFilterAll struct {
+	PrivateResourceID *uuid.UUID
+	NetworkID         *uuid.UUID
+}
+
 type UpdateTunnelCredentialLivenessInput struct {
 	ID              uuid.UUID
 	EnrollmentState TunnelEnrollmentState

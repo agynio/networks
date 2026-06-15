@@ -15,6 +15,7 @@ import (
 
 const (
 	managedByNetworksService = "networks-service"
+	managedByTagKey          = "agyn.managed_by"
 	openZitiProtocolTCP      = "tcp"
 )
 
@@ -283,7 +284,7 @@ func privateResourceAccessTags(networkID uuid.UUID, accessID uuid.UUID) map[stri
 
 func baseZitiTags(resourceType string, resourceID uuid.UUID, networkID uuid.UUID) map[string]string {
 	return map[string]string{
-		"agyn.managed_by":    managedByNetworksService,
+		managedByTagKey:      managedByNetworksService,
 		"agyn.resource_type": resourceType,
 		"agyn.resource_id":   resourceID.String(),
 		"agyn.network_id":    networkID.String(),

@@ -12,6 +12,18 @@ func (s *Server) Reconcile(ctx context.Context) error {
 	if s.zitiManagementClient == nil {
 		return nil
 	}
+	services, err := s.listManagedServices(ctx)
+	if err != nil {
+		return err
+	}
+	identities, err := s.listManagedIdentities(ctx)
+	if err != nil {
+		return err
+	}
+	policies, err := s.listManagedServicePolicies(ctx)
+	if err != nil {
+		return err
+	}
 	networks, err := s.store.ListAllNetworks(ctx)
 	if err != nil {
 		return err
@@ -28,49 +40,76 @@ func (s *Server) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, network := range networks {
-		s.reconcileNetwork(ctx, network)
+	for index, network := range networks {
+		networks[index] = s.reconcileNetwork(ctx, network, policies)
 	}
-	for _, resource := range resources {
-		s.reconcilePrivateResource(ctx, resource)
+	for index, resource := range resources {
+		resources[index] = s.reconcilePrivateResource(ctx, resource, services)
 	}
-	for _, access := range accesses {
-		s.reconcilePrivateResourceAccess(ctx, access)
+	for index, access := range accesses {
+		accesses[index] = s.reconcilePrivateResourceAccess(ctx, access, policies)
 	}
 	s.cleanupOrphanServices(ctx, resources)
 	s.cleanupOrphanServicePolicies(ctx, networks, accesses)
-	s.cleanupOrphanIdentities(ctx, credentials)
+	s.cleanupOrphanIdentities(ctx, credentials, identities)
 	return nil
 }
 
-func (s *Server) reconcileNetwork(ctx context.Context, network store.Network) {
-	if network.OpenZitiBindPolicyID != "" && network.ProvisioningState == store.ProvisioningStateActive {
-		return
+func (s *Server) reconcileNetwork(ctx context.Context, network store.Network, policies []*zitimgmtv1.OpenZitiServicePolicy) store.Network {
+	if network.OpenZitiBindPolicyID != "" && network.ProvisioningState == store.ProvisioningStateActive && servicePolicyExists(policies, network.OpenZitiBindPolicyID) {
+		return network
 	}
 	provisioning := s.provisionNetworkBindPolicy(ctx, network.Meta.ID)
-	if _, err := s.store.UpdateNetworkProvisioning(ctx, network.Meta.ID, provisioning.State, provisioning.BindPolicyID); err != nil {
+	updated, err := s.store.UpdateNetworkProvisioning(ctx, network.Meta.ID, provisioning.State, provisioning.BindPolicyID)
+	if err != nil {
 		log.Printf("reconcile network %s failed: %v", network.Meta.ID, err)
+		return network
 	}
+	return updated
 }
 
-func (s *Server) reconcilePrivateResource(ctx context.Context, resource store.PrivateResource) {
-	if resource.OpenZitiServiceID != "" && resource.ProvisioningState == store.ProvisioningStateActive {
-		return
+func (s *Server) reconcilePrivateResource(ctx context.Context, resource store.PrivateResource, services []*zitimgmtv1.OpenZitiService) store.PrivateResource {
+	if resource.OpenZitiServiceID != "" && resource.ProvisioningState == store.ProvisioningStateActive && serviceExists(services, resource.OpenZitiServiceID) {
+		return resource
 	}
 	provisioning := s.provisionPrivateResource(ctx, resource)
-	if _, err := s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioning.State, provisioning.ServiceID); err != nil {
+	updated, err := s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioning.State, provisioning.ServiceID)
+	if err != nil {
 		log.Printf("reconcile private resource %s failed: %v", resource.Meta.ID, err)
+		return resource
 	}
+	return updated
 }
 
-func (s *Server) reconcilePrivateResourceAccess(ctx context.Context, access store.PrivateResourceAccess) {
-	if access.OpenZitiDialPolicyID != "" && access.ProvisioningState == store.ProvisioningStateActive {
-		return
+func (s *Server) reconcilePrivateResourceAccess(ctx context.Context, access store.PrivateResourceAccess, policies []*zitimgmtv1.OpenZitiServicePolicy) store.PrivateResourceAccess {
+	if access.OpenZitiDialPolicyID != "" && access.ProvisioningState == store.ProvisioningStateActive && servicePolicyExists(policies, access.OpenZitiDialPolicyID) {
+		return access
 	}
 	provisioning := s.provisionPrivateResourceAccess(ctx, access)
-	if _, err := s.store.UpdatePrivateResourceAccessProvisioning(ctx, access.Meta.ID, provisioning.State, provisioning.DialPolicyID); err != nil {
+	updated, err := s.store.UpdatePrivateResourceAccessProvisioning(ctx, access.Meta.ID, provisioning.State, provisioning.DialPolicyID)
+	if err != nil {
 		log.Printf("reconcile private resource access %s failed: %v", access.Meta.ID, err)
+		return access
 	}
+	return updated
+}
+
+func serviceExists(services []*zitimgmtv1.OpenZitiService, serviceID string) bool {
+	for _, service := range services {
+		if service.GetZitiServiceId() == serviceID {
+			return true
+		}
+	}
+	return false
+}
+
+func servicePolicyExists(policies []*zitimgmtv1.OpenZitiServicePolicy, policyID string) bool {
+	for _, policy := range policies {
+		if policy.GetZitiServicePolicyId() == policyID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) cleanupOrphanServices(ctx context.Context, resources []store.PrivateResource) {
@@ -124,17 +163,12 @@ func (s *Server) cleanupOrphanServicePolicies(ctx context.Context, networks []st
 	}
 }
 
-func (s *Server) cleanupOrphanIdentities(ctx context.Context, credentials []store.TunnelCredential) {
+func (s *Server) cleanupOrphanIdentities(ctx context.Context, credentials []store.TunnelCredential, identities []*zitimgmtv1.OpenZitiIdentity) {
 	managed := map[string]struct{}{}
 	for _, credential := range credentials {
 		if credential.OpenZitiIdentityID != "" {
 			managed[credential.OpenZitiIdentityID] = struct{}{}
 		}
-	}
-	identities, err := s.listManagedIdentities(ctx)
-	if err != nil {
-		log.Printf("list managed OpenZiti identities failed: %v", err)
-		return
 	}
 	for _, identity := range identities {
 		if _, ok := managed[identity.GetZitiIdentityId()]; ok {
@@ -196,5 +230,5 @@ func (s *Server) listManagedServicePolicies(ctx context.Context) ([]*zitimgmtv1.
 }
 
 func managedTags() map[string]string {
-	return map[string]string{"managed_by": managedByNetworksService}
+	return map[string]string{managedByTagKey: managedByNetworksService}
 }

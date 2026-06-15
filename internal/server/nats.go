@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log"
 	"time"
 
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
@@ -46,15 +47,36 @@ func (s *Server) SubscribeGroupDeleted(ctx context.Context, conn *nats.Conn) (*n
 		return nil, err
 	}
 	return jetStream.Subscribe(groupsDeletedSubject, func(message *nats.Msg) {
-		event := &groupsv1.GroupDeletedEvent{}
-		if err := proto.Unmarshal(message.Data, event); err != nil {
-			return
-		}
-		if err := s.HandleGroupDeleted(ctx, event); err != nil {
-			return
-		}
-		_ = message.Ack()
+		s.handleGroupDeletedMessage(ctx, message.Data, message.Ack, message.Nak, message.Term)
 	}, nats.Durable("networks-group-deleted"), nats.ManualAck())
+}
+
+func (s *Server) handleGroupDeletedMessage(ctx context.Context, payload []byte, ack func(...nats.AckOpt) error, nak func(...nats.AckOpt) error, term func(...nats.AckOpt) error) {
+	event := &groupsv1.GroupDeletedEvent{}
+	if err := proto.Unmarshal(payload, event); err != nil {
+		log.Printf("decode %s event failed: %v", groupsDeletedSubject, err)
+		if ackErr := term(); ackErr != nil {
+			log.Printf("term malformed %s event failed: %v", groupsDeletedSubject, ackErr)
+		}
+		return
+	}
+	if event.GetGroupId() == "" {
+		log.Printf("decode %s event failed: missing group_id", groupsDeletedSubject)
+		if ackErr := term(); ackErr != nil {
+			log.Printf("term malformed %s event failed: %v", groupsDeletedSubject, ackErr)
+		}
+		return
+	}
+	if err := s.HandleGroupDeleted(ctx, event); err != nil {
+		log.Printf("handle %s event failed: %v", groupsDeletedSubject, err)
+		if ackErr := nak(); ackErr != nil {
+			log.Printf("nak %s event failed: %v", groupsDeletedSubject, ackErr)
+		}
+		return
+	}
+	if err := ack(); err != nil {
+		log.Printf("ack %s event failed: %v", groupsDeletedSubject, err)
+	}
 }
 
 func eventMessageID(prefix string) string {

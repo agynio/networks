@@ -45,6 +45,10 @@ func appendClause(clauses []string, args []any, format string, value any) ([]str
 	return clauses, args
 }
 
+func joinClauses(clauses []string) string {
+	return strings.Join(clauses, " AND ")
+}
+
 func buildListEntitiesQuery(baseQuery string, clauses []string, args []any, cursor *PageCursor, pageSize int32, cursorColumn string) (string, []any, int32) {
 	limit := NormalizePageSize(pageSize)
 
@@ -60,7 +64,7 @@ func buildListEntitiesQuery(baseQuery string, clauses []string, args []any, curs
 
 	if len(clauses) > 0 {
 		query.WriteString(" WHERE ")
-		query.WriteString(strings.Join(clauses, " AND "))
+		query.WriteString(joinClauses(clauses))
 	}
 	query.WriteString(fmt.Sprintf(" ORDER BY %s ASC LIMIT $%d", cursorColumn, paramIndex))
 	args = append(args, int(limit)+1)
