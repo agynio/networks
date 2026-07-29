@@ -14,7 +14,14 @@ image:
 
 replicaCount: 1
 revisionHistoryLimit: 10
-updateStrategy: {}
+# Recreate, not RollingUpdate: this service binds a durable NATS consumer, and
+# NATS allows exactly one binding at a time. A rolling update briefly runs the
+# old and new pod together, so the new one dies with "consumer is already bound
+# to a subscription" — and because it never becomes ready, the old pod is never
+# retired and the rollout deadlocks. Taking the old pod down first costs a few
+# seconds of downtime and actually completes.
+updateStrategy:
+  type: Recreate
 
 deploymentAnnotations: {}
 
