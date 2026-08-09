@@ -93,7 +93,7 @@ func validateInterceptHost(host string) error {
 	if normalized == "" {
 		return fmt.Errorf("intercept host must be provided")
 	}
-	if normalized == "localhost" || strings.HasSuffix(normalized, ".ziti") || strings.HasSuffix(normalized, ".svc") || strings.HasSuffix(normalized, ".cluster.local") {
+	if normalized == "localhost" || strings.HasSuffix(normalized, ".agyn") || strings.HasSuffix(normalized, ".svc") || strings.HasSuffix(normalized, ".cluster.local") {
 		return fmt.Errorf("intercept host is reserved")
 	}
 	if ip := net.ParseIP(normalized); ip != nil {

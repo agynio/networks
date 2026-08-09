@@ -52,7 +52,7 @@ func TestCreatePrivateResourceValidatesPortsAndHost(t *testing.T) {
 		Protocol:       networksv1.PrivateResourceProtocol_PRIVATE_RESOURCE_PROTOCOL_TCP,
 		TargetHost:     "postgres.internal",
 		TargetPorts:    []int32{5432},
-		InterceptHost:  "postgres.ziti",
+		InterceptHost:  "postgres.agyn",
 		InterceptPorts: []int32{15432},
 	})
 	assertCode(t, err, codes.InvalidArgument)

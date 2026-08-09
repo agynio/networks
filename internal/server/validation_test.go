@@ -33,7 +33,7 @@ func TestValidatePortMapping(t *testing.T) {
 }
 
 func TestValidateInterceptHostRejectsReserved(t *testing.T) {
-	for _, host := range []string{"localhost", "db.ziti", "api.svc", "api.default.svc.cluster.local", "127.0.0.1", "::1", "100.64.0.10"} {
+	for _, host := range []string{"localhost", "db.agyn", "api.svc", "api.default.svc.cluster.local", "127.0.0.1", "::1", "100.64.0.10"} {
 		t.Run(host, func(t *testing.T) {
 			if err := validateInterceptHost(host); err == nil {
 				t.Fatal("expected reserved host error")
