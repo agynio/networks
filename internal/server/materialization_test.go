@@ -282,6 +282,92 @@ func TestReconcileRecreatesActiveRowsWithMissingZitiIDs(t *testing.T) {
 	}
 }
 
+// A service predating the per-resource role attribute must be re-provisioned:
+// dial policies select on that attribute, so without it access never resolves.
+func TestReconcileReprovisionsServiceMissingItsRoleAttribute(t *testing.T) {
+	fakeStore := newFakeStore()
+	ziti := &fakeZitiManagementClient{serviceID: "service-id", servicePolicyID: "policy-id"}
+	server := NewWithDependencies(fakeStore, nil, nil, nil, ziti, nil, nil)
+	network := fakeStore.mustCreateNetwork(uuid.New())
+	network.OpenZitiBindPolicyID = "bind-policy"
+	fakeStore.networks[network.Meta.ID] = network
+	resource := fakeStore.mustCreatePrivateResource(network)
+	resource.OpenZitiServiceID = "service-id"
+	fakeStore.resources[resource.Meta.ID] = resource
+	ziti.listedPolicies = []*zitimgmtv1.OpenZitiServicePolicy{{ZitiServicePolicyId: "bind-policy"}}
+	ziti.listedServices = []*zitimgmtv1.OpenZitiService{{
+		ZitiServiceId:  "service-id",
+		RoleAttributes: []string{networkResourcesRoleAttribute(network.Meta.ID)},
+	}}
+
+	if err := server.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(ziti.createdServices) != 1 {
+		t.Fatalf("expected the service re-provisioned, got %d creates", len(ziti.createdServices))
+	}
+	assertStringSlice(t, ziti.createdServices[0].GetRoleAttributes(), []string{
+		networkResourcesRoleAttribute(network.Meta.ID),
+		privateResourceRoleAttribute(resource.Meta.ID),
+	})
+
+	// Once the attribute is present the guard holds and the loop goes quiet.
+	ziti.createdServices = nil
+	ziti.listedServices[0].RoleAttributes = append(ziti.listedServices[0].RoleAttributes, privateResourceRoleAttribute(resource.Meta.ID))
+	if err := server.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(ziti.createdServices) != 0 {
+		t.Fatalf("expected no churn once converged, got %d creates", len(ziti.createdServices))
+	}
+}
+
+// A re-provision that fails must leave the recorded Ziti IDs alone; wiping them
+// strands the live objects and makes every later reconcile conflict on the name.
+func TestReconcileKeepsZitiIDsWhenReprovisionFails(t *testing.T) {
+	fakeStore := newFakeStore()
+	ziti := &fakeZitiManagementClient{
+		createPolicyErr:  errors.New("name must be unique"),
+		createServiceErr: errors.New("name must be unique"),
+	}
+	server := NewWithDependencies(fakeStore, nil, nil, nil, ziti, nil, nil)
+	network := fakeStore.mustCreateNetwork(uuid.New())
+	network.OpenZitiBindPolicyID = "live-bind-policy"
+	fakeStore.networks[network.Meta.ID] = network
+	resource := fakeStore.mustCreatePrivateResource(network)
+	resource.OpenZitiServiceID = "live-service"
+	fakeStore.resources[resource.Meta.ID] = resource
+	access, err := fakeStore.CreatePrivateResourceAccess(context.Background(), store.CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resource.Meta.ID, PrincipalType: store.PrincipalTypeUser, PrincipalID: uuid.New()})
+	if err != nil {
+		t.Fatalf("CreatePrivateResourceAccess: %v", err)
+	}
+	access.OpenZitiDialPolicyID = "live-dial-policy"
+	fakeStore.accesses[access.Meta.ID] = access
+
+	if err := server.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := fakeStore.networks[network.Meta.ID]; got.OpenZitiBindPolicyID != "live-bind-policy" || got.ProvisioningState != store.ProvisioningStateFailed {
+		t.Fatalf("expected bind policy id kept and state failed, got %#v", got)
+	}
+	if got := fakeStore.resources[resource.Meta.ID]; got.OpenZitiServiceID != "live-service" || got.ProvisioningState != store.ProvisioningStateFailed {
+		t.Fatalf("expected service id kept and state failed, got %#v", got)
+	}
+	if got := fakeStore.accesses[access.Meta.ID]; got.OpenZitiDialPolicyID != "live-dial-policy" || got.ProvisioningState != store.ProvisioningStateFailed {
+		t.Fatalf("expected dial policy id kept and state failed, got %#v", got)
+	}
+	for _, request := range ziti.createdServicePolicies {
+		if !request.GetReturnExisting() {
+			t.Fatalf("expected policy create to adopt an existing name: %#v", request)
+		}
+	}
+	for _, request := range ziti.createdServices {
+		if !request.GetReturnExisting() {
+			t.Fatalf("expected service create to adopt an existing name: %#v", request)
+		}
+	}
+}
+
 func TestManagedTagLookupMatchesCreatedTags(t *testing.T) {
 	tags := privateResourceTags(uuid.New(), uuid.New())
 	if managedTags()[managedByTagKey] != tags[managedByTagKey] {

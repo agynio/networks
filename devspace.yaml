@@ -1,0 +1,133 @@
+version: v2beta1
+
+vars:
+  NETWORKS_NAMESPACE: platform
+
+functions:
+  patch_deployment: |-
+    echo "Patching networks deployment for DevSpace..."
+    # Its own release names the deployment networks-networks, the umbrella
+    # names it networks. Look it up by label rather than guessing.
+    NETWORKS_DEPLOYMENT="$(kubectl get deployment -n ${NETWORKS_NAMESPACE} \
+      -l app.kubernetes.io/name=networks -o jsonpath='{.items[0].metadata.name}')"
+    kubectl patch deployment "${NETWORKS_DEPLOYMENT}" -n ${NETWORKS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsUser: 1000
+            fsGroup: 1000
+          initContainers: []
+          volumes:
+            - name: data
+              emptyDir: {}
+          containers:
+            - name: networks
+              image: ghcr.io/agynio/devcontainer-go:1
+              workingDir: /opt/app/data
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  elapsed=0
+                  while [ ! -f /opt/app/data/go.mod ]; do
+                    sleep 1; elapsed=$((elapsed + 1))
+                    [ "$elapsed" -ge 120 ] && { echo "ERROR: sync timeout" >&2; exit 1; }
+                  done
+                  # .gen survives restarts in the synced volume; regenerating on every
+                  # crash-loop restart rate-limits us out of the BSR. The marker keys
+                  # on the command, not the module, so delete the pod after an api
+                  # publish to pick up new protos.
+                  GEN="buf generate --template buf.gen.yaml"
+                  if [ "$(cat .gen/.gen-cmd 2>/dev/null)" != "$GEN" ]; then
+                    rm -rf .gen
+                    sh -c "$GEN"
+                    printf '%s' "$GEN" > .gen/.gen-cmd
+                  fi
+                  exec go run ./cmd/networks
+              volumeMounts:
+                - name: data
+                  mountPath: /opt/app/data
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+                readOnlyRootFilesystem: false
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+    EOF
+    )"
+    # go run recompiles on every restart; the probes would kill the pod before
+    # the first build finishes. Nulling through a strategic merge tolerates
+    # them already being absent, so the patch stays re-runnable.
+    kubectl patch deployment "${NETWORKS_DEPLOYMENT}" -n ${NETWORKS_NAMESPACE} --type strategic --patch \
+      '{"spec":{"template":{"spec":{"containers":[{"name":"networks","livenessProbe":null,"readinessProbe":null}]}}}}'
+
+pipelines:
+  dev:
+    flags:
+      - name: watch
+        short: w
+        description: "Keep DevSpace running and stream logs"
+    run: |-
+      patch_deployment
+      if [ "$(get_flag "watch")" == "true" ]; then
+        start_dev --disable-pod-replace networks
+      else
+        start_dev --disable-pod-replace networks
+        echo "Waiting for networks to be healthy on :50051..."
+        healthy=false
+        for i in $(seq 1 60); do
+          if exec_container --label-selector=app.kubernetes.io/name=networks -n ${NETWORKS_NAMESPACE} -- bash -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
+            healthy=true
+            break
+          fi
+          sleep 2
+        done
+        if [ "$healthy" != "true" ]; then
+          echo "ERROR: networks did not become healthy within 120s" >&2
+          exit 1
+        fi
+        echo "Dev environment ready. Stopping dev session."
+        stop_dev networks
+      fi
+
+dev:
+  networks:
+    namespace: ${NETWORKS_NAMESPACE}
+    labelSelector:
+      app.kubernetes.io/name: networks
+    containers:
+      networks:
+        container: networks
+        sync:
+          - path: ./:/opt/app/data
+            excludePaths:
+              - .git/
+              - .devspace/
+              - /.gen/
+              - /tmp/
+            uploadExcludePaths:
+              - .git/
+              - .devspace/
+              - /.gen/
+              - /tmp/
+            downloadExcludePaths:
+              - .git/
+              - .devspace/
+              - /.gen/
+              - /tmp/
+        logs:
+          enabled: true
+          lastLines: 200

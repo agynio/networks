@@ -160,7 +160,9 @@ func TestAccessGrantDialPolicyRoleAttrs(t *testing.T) {
 			}
 			policy := ziti.createdServicePolicies[0]
 			assertStringSlice(t, policy.GetIdentityRoles(), []string{tc.rolePrefix + principalID.String()})
-			assertStringSlice(t, policy.GetServiceRoles(), []string{"@private-" + resource.Meta.ID.String()})
+			// Ziti resolves "@" only by id, never by name, so this must select
+			// the service by role attribute.
+			assertStringSlice(t, policy.GetServiceRoles(), []string{"#private-resource-" + resource.Meta.ID.String()})
 		})
 	}
 }

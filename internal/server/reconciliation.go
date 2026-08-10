@@ -60,7 +60,7 @@ func (s *Server) reconcileNetwork(ctx context.Context, network store.Network, po
 		return network
 	}
 	provisioning := s.provisionNetworkBindPolicy(ctx, network.Meta.ID)
-	updated, err := s.store.UpdateNetworkProvisioning(ctx, network.Meta.ID, provisioning.State, provisioning.BindPolicyID)
+	updated, err := s.store.UpdateNetworkProvisioning(ctx, network.Meta.ID, provisioning.State, keepID(provisioning.BindPolicyID, network.OpenZitiBindPolicyID))
 	if err != nil {
 		log.Printf("reconcile network %s failed: %v", network.Meta.ID, err)
 		return network
@@ -69,11 +69,11 @@ func (s *Server) reconcileNetwork(ctx context.Context, network store.Network, po
 }
 
 func (s *Server) reconcilePrivateResource(ctx context.Context, resource store.PrivateResource, services []*zitimgmtv1.OpenZitiService) store.PrivateResource {
-	if resource.OpenZitiServiceID != "" && resource.ProvisioningState == store.ProvisioningStateActive && serviceExists(services, resource.OpenZitiServiceID) {
+	if resource.OpenZitiServiceID != "" && resource.ProvisioningState == store.ProvisioningStateActive && serviceHasRoleAttribute(services, resource.OpenZitiServiceID, privateResourceRoleAttribute(resource.Meta.ID)) {
 		return resource
 	}
 	provisioning := s.provisionPrivateResource(ctx, resource)
-	updated, err := s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioning.State, provisioning.ServiceID)
+	updated, err := s.store.UpdatePrivateResourceProvisioning(ctx, resource.Meta.ID, provisioning.State, keepID(provisioning.ServiceID, resource.OpenZitiServiceID))
 	if err != nil {
 		log.Printf("reconcile private resource %s failed: %v", resource.Meta.ID, err)
 		return resource
@@ -86,7 +86,7 @@ func (s *Server) reconcilePrivateResourceAccess(ctx context.Context, access stor
 		return access
 	}
 	provisioning := s.provisionPrivateResourceAccess(ctx, access)
-	updated, err := s.store.UpdatePrivateResourceAccessProvisioning(ctx, access.Meta.ID, provisioning.State, provisioning.DialPolicyID)
+	updated, err := s.store.UpdatePrivateResourceAccessProvisioning(ctx, access.Meta.ID, provisioning.State, keepID(provisioning.DialPolicyID, access.OpenZitiDialPolicyID))
 	if err != nil {
 		log.Printf("reconcile private resource access %s failed: %v", access.Meta.ID, err)
 		return access
@@ -94,11 +94,27 @@ func (s *Server) reconcilePrivateResourceAccess(ctx context.Context, access stor
 	return updated
 }
 
-func serviceExists(services []*zitimgmtv1.OpenZitiService, serviceID string) bool {
+// A failed re-provision must not erase the Ziti ID we already recorded.
+func keepID(provisioned, existing string) string {
+	if provisioned == "" {
+		return existing
+	}
+	return provisioned
+}
+
+// Dial policies select the service by this attribute, so a service missing it
+// is as unusable as an absent one and must be re-provisioned.
+func serviceHasRoleAttribute(services []*zitimgmtv1.OpenZitiService, serviceID, attribute string) bool {
 	for _, service := range services {
-		if service.GetZitiServiceId() == serviceID {
-			return true
+		if service.GetZitiServiceId() != serviceID {
+			continue
 		}
+		for _, role := range service.GetRoleAttributes() {
+			if role == attribute {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
