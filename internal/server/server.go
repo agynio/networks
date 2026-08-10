@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	agentsv1 "github.com/agynio/networks/.gen/go/agynio/api/agents/v1"
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
@@ -68,6 +69,13 @@ type groupsClient interface {
 	GetGroup(context.Context, *groupsv1.GetGroupRequest, ...grpc.CallOption) (*groupsv1.GetGroupResponse, error)
 }
 
+// agentsClient resolves an environment principal. An environment is a
+// configuration resource rather than an identity, so it is not in the Identity
+// registry and the usual GetIdentityType path cannot see it.
+type agentsClient interface {
+	GetEnvironment(context.Context, *agentsv1.GetEnvironmentRequest, ...grpc.CallOption) (*agentsv1.GetEnvironmentResponse, error)
+}
+
 type notificationsClient interface {
 	Publish(context.Context, *notificationsv1.PublishRequest, ...grpc.CallOption) (*notificationsv1.PublishResponse, error)
 }
@@ -81,6 +89,7 @@ type Server struct {
 	authorizationClient  authorizationClient
 	identityClient       identityClient
 	groupsClient         groupsClient
+	agentsClient         agentsClient
 	zitiManagementClient zitiManagementClient
 	notificationsClient  notificationsClient
 	eventPublisher       eventPublisher
@@ -95,6 +104,14 @@ func NewWithClients(store Store, authorizationClient authorizationClient, identi
 
 func NewWithDependencies(store Store, authorizationClient authorizationClient, identityClient identityClient, groupsClient groupsClient, zitiManagementClient zitiManagementClient, notificationsClient notificationsClient, eventPublisher eventPublisher) *Server {
 	return &Server{store: store, authorizationClient: authorizationClient, identityClient: identityClient, groupsClient: groupsClient, zitiManagementClient: zitiManagementClient, notificationsClient: notificationsClient, eventPublisher: eventPublisher, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// WithAgentsClient supplies the client that resolves environment principals.
+// Set separately so the existing constructors keep their signatures -- every
+// other principal type resolves without it.
+func (s *Server) WithAgentsClient(client agentsClient) *Server {
+	s.agentsClient = client
+	return s
 }
 
 func (s *Server) CreateNetwork(ctx context.Context, request *networksv1.CreateNetworkRequest) (*networksv1.CreateNetworkResponse, error) {
@@ -726,9 +743,12 @@ const (
 	identityObjectPrefix        = "identity:"
 	organizationObjectPrefix    = "organization:"
 	agentObjectPrefix           = "agent:"
+	environmentObjectPrefix     = "environment:"
 	organizationOwnerRelation   = "owner"
 	organizationMemberRelation  = "member"
 	agentCanEditConfigRelation  = "can_edit_config"
+	// The same relation the agent principal uses, on the environment type.
+	environmentCanEditConfigRelation = "can_edit_config"
 )
 
 func (s *Server) requireOrganizationOwner(ctx context.Context, organizationID uuid.UUID) error {
@@ -744,10 +764,22 @@ func (s *Server) requireAgentConfigEditor(ctx context.Context, agentID uuid.UUID
 }
 
 func (s *Server) requireAccessMutationAllowed(ctx context.Context, principalType store.PrincipalType, principalID uuid.UUID, organizationID uuid.UUID) error {
-	if principalType == store.PrincipalTypeAgent {
+	switch principalType {
+	case store.PrincipalTypeAgent:
 		return s.requireAgentConfigEditor(ctx, principalID)
+	case store.PrincipalTypeEnvironment:
+		// The same permission that edits the environment's other contents, and
+		// the same one an egress rule attachment to an environment requires.
+		// Not organization owner: attaching a credential-injecting egress rule
+		// is the same class of act and the platform already settled it here.
+		return s.requireEnvironmentConfigEditor(ctx, principalID)
+	default:
+		return s.requireOrganizationOwner(ctx, organizationID)
 	}
-	return s.requireOrganizationOwner(ctx, organizationID)
+}
+
+func (s *Server) requireEnvironmentConfigEditor(ctx context.Context, environmentID uuid.UUID) error {
+	return s.requireAllowed(ctx, environmentCanEditConfigRelation, environmentObject(environmentID))
 }
 
 func (s *Server) requireAllowed(ctx context.Context, relation string, object string) error {
@@ -769,6 +801,26 @@ func (s *Server) requireAllowed(ctx context.Context, relation string, object str
 }
 
 func (s *Server) validatePrincipalSameOrg(ctx context.Context, principalType store.PrincipalType, principalID uuid.UUID, organizationID uuid.UUID) error {
+	if principalType == store.PrincipalTypeEnvironment {
+		if s.agentsClient == nil {
+			return nil
+		}
+		// Agents authorizes environment reads against the caller, so the
+		// request has to say who is asking -- the same reason the group lookup
+		// forwards it.
+		response, err := s.agentsClient.GetEnvironment(forwardCallerIdentity(ctx), &agentsv1.GetEnvironmentRequest{Id: principalID.String()})
+		if err != nil {
+			return status.Errorf(codes.InvalidArgument, "environment lookup: %v", err)
+		}
+		environmentOrgID, err := uuid.Parse(response.GetEnvironment().GetOrganizationId())
+		if err != nil {
+			return status.Errorf(codes.Internal, "environment organization id: %v", err)
+		}
+		if environmentOrgID != organizationID {
+			return status.Error(codes.InvalidArgument, "principal does not belong to resource organization")
+		}
+		return nil
+	}
 	if principalType == store.PrincipalTypeGroup {
 		if s.groupsClient == nil {
 			return nil
@@ -853,6 +905,7 @@ func firstMetadataValue(md metadata.MD, key string) string {
 func identityObject(id uuid.UUID) string     { return identityObjectPrefix + id.String() }
 func organizationObject(id uuid.UUID) string { return organizationObjectPrefix + id.String() }
 func agentObject(id uuid.UUID) string        { return agentObjectPrefix + id.String() }
+func environmentObject(id uuid.UUID) string  { return environmentObjectPrefix + id.String() }
 
 func parseUUIDField(field string, value string) (uuid.UUID, error) {
 	id, err := uuid.Parse(value)
@@ -1005,6 +1058,8 @@ func convertPrincipalType(principalType store.PrincipalType) networksv1.PrivateR
 		return networksv1.PrivateResourceAccessPrincipalType_PRIVATE_RESOURCE_ACCESS_PRINCIPAL_TYPE_USER
 	case store.PrincipalTypeApp:
 		return networksv1.PrivateResourceAccessPrincipalType_PRIVATE_RESOURCE_ACCESS_PRINCIPAL_TYPE_APP
+	case store.PrincipalTypeEnvironment:
+		return networksv1.PrivateResourceAccessPrincipalType_PRIVATE_RESOURCE_ACCESS_PRINCIPAL_TYPE_ENVIRONMENT
 	case store.PrincipalTypeGroup:
 		return networksv1.PrivateResourceAccessPrincipalType_PRIVATE_RESOURCE_ACCESS_PRINCIPAL_TYPE_GROUP
 	default:
@@ -1022,8 +1077,10 @@ func toStorePrincipalType(principalType networksv1.PrivateResourceAccessPrincipa
 		return store.PrincipalTypeApp, nil
 	case networksv1.PrivateResourceAccessPrincipalType_PRIVATE_RESOURCE_ACCESS_PRINCIPAL_TYPE_GROUP:
 		return store.PrincipalTypeGroup, nil
+	case networksv1.PrivateResourceAccessPrincipalType_PRIVATE_RESOURCE_ACCESS_PRINCIPAL_TYPE_ENVIRONMENT:
+		return store.PrincipalTypeEnvironment, nil
 	default:
-		return "", fmt.Errorf("must be agent, user, app, or group")
+		return "", fmt.Errorf("must be agent, environment, user, app, or group")
 	}
 }
 
@@ -1035,8 +1092,8 @@ func expectedIdentityType(principalType store.PrincipalType) identityv1.Identity
 		return identityv1.IdentityType_IDENTITY_TYPE_USER
 	case store.PrincipalTypeApp:
 		return identityv1.IdentityType_IDENTITY_TYPE_APP
-	case store.PrincipalTypeGroup:
-		panic("group principal has no identity type")
+	case store.PrincipalTypeGroup, store.PrincipalTypeEnvironment:
+		panic(fmt.Sprintf("%s principal has no identity type", principalType))
 	default:
 		panic(fmt.Sprintf("unexpected principal type: %q", principalType))
 	}

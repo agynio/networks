@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	agentsv1 "github.com/agynio/networks/.gen/go/agynio/api/agents/v1"
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
@@ -64,6 +65,7 @@ func run() error {
 		authorizationClient authorizationv1.AuthorizationServiceClient
 		identityClient      identityv1.IdentityServiceClient
 		groupsClient        groupsv1.GroupsServiceClient
+		agentsClient        agentsv1.AgentsServiceClient
 		zitiClient          zitimgmtv1.ZitiManagementServiceClient
 		notificationsClient notificationsv1.NotificationsServiceClient
 		eventPublisher      server.EventPublisher
@@ -98,6 +100,13 @@ func run() error {
 		defer closeConn(groupsConn)
 		groupsClient = groupsv1.NewGroupsServiceClient(groupsConn)
 
+		agentsConn, err := grpc.NewClient(cfg.AgentsGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("connect to agents: %w", err)
+		}
+		defer closeConn(agentsConn)
+		agentsClient = agentsv1.NewAgentsServiceClient(agentsConn)
+
 		notificationsConn, err := grpc.NewClient(cfg.NotificationsGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			return fmt.Errorf("connect to notifications: %w", err)
@@ -121,7 +130,7 @@ func run() error {
 
 	grpcServer := grpc.NewServer()
 	networksStore := store.New(pool)
-	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher)
+	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher).WithAgentsClient(agentsClient)
 	if err := networksServer.Reconcile(ctx); err != nil {
 		return fmt.Errorf("initial reconciliation: %w", err)
 	}

@@ -253,6 +253,11 @@ func principalRoleAttribute(principalType store.PrincipalType, principalID uuid.
 		return fmt.Sprintf("app-%s", principalID)
 	case store.PrincipalTypeGroup:
 		return fmt.Sprintf("group-%s", principalID)
+	case store.PrincipalTypeEnvironment:
+		// Stamped by the Agents Orchestrator on every workload identity it
+		// creates -- agent workloads and sandboxes alike -- and already the
+		// target of egress rule attachments. Nothing new is provisioned for it.
+		return fmt.Sprintf("environment-%s", principalID)
 	default:
 		panic(fmt.Sprintf("unknown principal type %s", principalType))
 	}
