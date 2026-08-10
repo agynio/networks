@@ -773,7 +773,9 @@ func (s *Server) validatePrincipalSameOrg(ctx context.Context, principalType sto
 		if s.groupsClient == nil {
 			return nil
 		}
-		response, err := s.groupsClient.GetGroup(ctx, &groupsv1.GetGroupRequest{Id: principalID.String()})
+		// Groups asks whether the caller is a member of the group's
+		// organization, so the request has to say who is asking.
+		response, err := s.groupsClient.GetGroup(forwardCallerIdentity(ctx), &groupsv1.GetGroupRequest{Id: principalID.String()})
 		if err != nil {
 			return status.Errorf(codes.InvalidArgument, "group lookup: %v", err)
 		}
@@ -807,6 +809,18 @@ func (s *Server) validatePrincipalSameOrg(ctx context.Context, principalType sto
 		return status.Error(codes.InvalidArgument, "principal does not belong to resource organization")
 	}
 	return nil
+}
+
+// forwardCallerIdentity carries the caller onto a call this service makes on
+// their behalf. gRPC does not do it: incoming metadata and outgoing metadata
+// are separate, so a context handed straight to a client arrives anonymous and
+// the callee answers Unauthenticated.
+func forwardCallerIdentity(ctx context.Context) context.Context {
+	callerID, err := callerIdentityID(ctx)
+	if err != nil {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, identityIDMetadataKey, callerID.String())
 }
 
 func callerIdentityID(ctx context.Context) (uuid.UUID, error) {
