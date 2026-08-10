@@ -49,6 +49,9 @@ const (
 	PrincipalTypeUser  PrincipalType = "user"
 	PrincipalTypeApp   PrincipalType = "app"
 	PrincipalTypeGroup PrincipalType = "group"
+	// An Environment, not an identity: it resolves to every workload running
+	// it, which is the only handle that reaches a sandbox.
+	PrincipalTypeEnvironment PrincipalType = "environment"
 )
 
 type Network struct {

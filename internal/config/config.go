@@ -14,6 +14,7 @@ type Config struct {
 	AuthorizationGRPCTarget  string
 	ZitiManagementGRPCTarget string
 	IdentityGRPCTarget       string
+	AgentsGRPCTarget         string
 	GroupsGRPCTarget         string
 	NotificationsGRPCTarget  string
 	NATSURL                  string
@@ -54,6 +55,12 @@ func FromEnv() (Config, error) {
 	cfg.GroupsGRPCTarget = os.Getenv("GROUPS_GRPC_TARGET")
 	if cfg.GroupsGRPCTarget == "" {
 		cfg.GroupsGRPCTarget = "groups:50051"
+	}
+	// Resolves environment principals on access grants. An environment is a
+	// configuration resource, not an identity, so Identity cannot answer for it.
+	cfg.AgentsGRPCTarget = os.Getenv("AGENTS_GRPC_TARGET")
+	if cfg.AgentsGRPCTarget == "" {
+		cfg.AgentsGRPCTarget = "agents:50051"
 	}
 	cfg.NotificationsGRPCTarget = os.Getenv("NOTIFICATIONS_GRPC_TARGET")
 	if cfg.NotificationsGRPCTarget == "" {

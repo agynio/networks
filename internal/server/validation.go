@@ -40,10 +40,10 @@ func validateProtocol(protocol store.PrivateResourceProtocol) error {
 
 func validatePrincipalType(principalType store.PrincipalType) error {
 	switch principalType {
-	case store.PrincipalTypeAgent, store.PrincipalTypeUser, store.PrincipalTypeApp, store.PrincipalTypeGroup:
+	case store.PrincipalTypeAgent, store.PrincipalTypeUser, store.PrincipalTypeApp, store.PrincipalTypeGroup, store.PrincipalTypeEnvironment:
 		return nil
 	default:
-		return fmt.Errorf("principal type must be agent, user, app, or group")
+		return fmt.Errorf("principal type must be agent, environment, user, app, or group")
 	}
 }
 

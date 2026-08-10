@@ -94,6 +94,9 @@ env:
     value: "identity:50051"
   - name: GROUPS_GRPC_TARGET
     value: "groups:50051"
+  # Resolves environment principals on access grants.
+  - name: AGENTS_GRPC_TARGET
+    value: "agents:50051"
   - name: NOTIFICATIONS_GRPC_TARGET
     value: "notifications:50051"
   - name: NATS_URL

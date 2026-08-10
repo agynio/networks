@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	zitimgmtv1 "github.com/agynio/networks/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/networks/internal/store"
@@ -62,6 +63,7 @@ func (s *Server) provisionNetworkBindPolicy(ctx context.Context, networkID uuid.
 	}
 	response, err := s.zitiManagementClient.CreateServicePolicy(ctx, createNetworkBindPolicyRequest(networkID))
 	if err != nil {
+		log.Printf("provision bind policy for network %s failed: %v", networkID, err)
 		return networkProvisioningResult{State: store.ProvisioningStateFailed}
 	}
 	return networkProvisioningResult{State: store.ProvisioningStateActive, BindPolicyID: response.GetZitiServicePolicyId()}
@@ -96,6 +98,7 @@ func (s *Server) provisionPrivateResource(ctx context.Context, resource store.Pr
 	}
 	response, err := s.zitiManagementClient.CreateService(ctx, createPrivateResourceServiceRequest(resource))
 	if err != nil {
+		log.Printf("provision service for private resource %s failed: %v", resource.Meta.ID, err)
 		return privateResourceProvisioningResult{State: store.ProvisioningStateFailed}
 	}
 	return privateResourceProvisioningResult{State: store.ProvisioningStateActive, ServiceID: response.GetZitiServiceId()}
@@ -107,6 +110,7 @@ func (s *Server) updatePrivateResourceProvisioning(ctx context.Context, resource
 	}
 	_, err := s.zitiManagementClient.UpdateService(ctx, updatePrivateResourceServiceRequest(resource))
 	if err != nil {
+		log.Printf("update service for private resource %s failed: %v", resource.Meta.ID, err)
 		return store.ProvisioningStateFailed
 	}
 	return store.ProvisioningStateActive
@@ -118,6 +122,7 @@ func (s *Server) provisionPrivateResourceAccess(ctx context.Context, access stor
 	}
 	response, err := s.zitiManagementClient.CreateServicePolicy(ctx, createResourceAccessDialPolicyRequest(access))
 	if err != nil {
+		log.Printf("provision dial policy for resource access %s failed: %v", access.Meta.ID, err)
 		return accessProvisioningResult{State: store.ProvisioningStateFailed}
 	}
 	return accessProvisioningResult{State: store.ProvisioningStateActive, DialPolicyID: response.GetZitiServicePolicyId()}
@@ -163,16 +168,20 @@ func createNetworkBindPolicyRequest(networkID uuid.UUID) *zitimgmtv1.CreateServi
 		IdentityRoles: []string{zitiRoleSelector(networkRoleAttribute(networkID))},
 		ServiceRoles:  []string{zitiRoleSelector(networkResourcesRoleAttribute(networkID))},
 		Tags:          networkBindPolicyTags(networkID),
+		// Names are unique in Ziti, so a reconcile after a lost response must
+		// adopt what is already there instead of conflicting forever.
+		ReturnExisting: true,
 	}
 }
 
 func createPrivateResourceServiceRequest(resource store.PrivateResource) *zitimgmtv1.CreateServiceRequest {
 	return &zitimgmtv1.CreateServiceRequest{
 		Name:              privateResourceServiceName(resource.Meta.ID),
-		RoleAttributes:    []string{networkResourcesRoleAttribute(resource.NetworkID)},
+		RoleAttributes:    []string{networkResourcesRoleAttribute(resource.NetworkID), privateResourceRoleAttribute(resource.Meta.ID)},
 		HostV1Config:      hostV1Config(resource),
 		InterceptV1Config: interceptV1Config(resource),
 		Tags:              privateResourceTags(resource.NetworkID, resource.Meta.ID),
+		ReturnExisting:    true,
 	}
 }
 
@@ -190,8 +199,11 @@ func createResourceAccessDialPolicyRequest(access store.PrivateResourceAccess) *
 		Type:          zitimgmtv1.ServicePolicyType_SERVICE_POLICY_TYPE_DIAL,
 		Name:          fmt.Sprintf("private-%s-%s-%s-dial", access.PrivateResourceID, access.PrincipalType, access.PrincipalID),
 		IdentityRoles: []string{zitiRoleSelector(principalRoleAttribute(access.PrincipalType, access.PrincipalID))},
-		ServiceRoles:  []string{zitiNamedServiceSelector(privateResourceServiceName(access.PrivateResourceID))},
-		Tags:          privateResourceAccessTags(access.NetworkID, access.Meta.ID),
+		// Ziti resolves "@" references by id only, never by name, and an id would
+		// go stale if the service is ever recreated. Select by role attribute.
+		ServiceRoles:   []string{zitiRoleSelector(privateResourceRoleAttribute(access.PrivateResourceID))},
+		Tags:           privateResourceAccessTags(access.NetworkID, access.Meta.ID),
+		ReturnExisting: true,
 	}
 }
 
@@ -243,6 +255,10 @@ func networkResourcesRoleAttribute(networkID uuid.UUID) string {
 	return fmt.Sprintf("network-resources-%s", networkID)
 }
 
+func privateResourceRoleAttribute(resourceID uuid.UUID) string {
+	return fmt.Sprintf("private-resource-%s", resourceID)
+}
+
 func principalRoleAttribute(principalType store.PrincipalType, principalID uuid.UUID) string {
 	switch principalType {
 	case store.PrincipalTypeAgent:
@@ -253,6 +269,11 @@ func principalRoleAttribute(principalType store.PrincipalType, principalID uuid.
 		return fmt.Sprintf("app-%s", principalID)
 	case store.PrincipalTypeGroup:
 		return fmt.Sprintf("group-%s", principalID)
+	case store.PrincipalTypeEnvironment:
+		// Stamped by the Agents Orchestrator on every workload identity it
+		// creates -- agent workloads and sandboxes alike -- and already the
+		// target of egress rule attachments. Nothing new is provisioned for it.
+		return fmt.Sprintf("environment-%s", principalID)
 	default:
 		panic(fmt.Sprintf("unknown principal type %s", principalType))
 	}
@@ -260,10 +281,6 @@ func principalRoleAttribute(principalType store.PrincipalType, principalID uuid.
 
 func zitiRoleSelector(attribute string) string {
 	return "#" + attribute
-}
-
-func zitiNamedServiceSelector(name string) string {
-	return "@" + name
 }
 
 func networkBindPolicyTags(networkID uuid.UUID) map[string]string {

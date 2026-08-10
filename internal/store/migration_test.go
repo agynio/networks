@@ -32,3 +32,11 @@ func TestInitialMigrationDefinesNetworksModel(t *testing.T) {
 	}
 	require.False(t, strings.Contains(sql, "runner"))
 }
+
+// A sandbox matches no identity-based principal, so the enum has to carry an
+// environment variant for it to be reachable at all.
+func TestEnvironmentPrincipalMigrationExtendsTheEnum(t *testing.T) {
+	content, err := migrations.Files.ReadFile("0002_private_resource_access_environment_principal.sql")
+	require.NoError(t, err)
+	require.Contains(t, string(content), "ALTER TYPE private_resource_access_principal_type ADD VALUE IF NOT EXISTS 'environment'")
+}

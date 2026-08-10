@@ -29,3 +29,4 @@ inputs:
       - agynio/api/ziti_management/v1
       - agynio/api/groups/v1
       - agynio/api/notifications/v1
+      - agynio/api/agents/v1
