@@ -13,6 +13,7 @@ import (
 
 	agentsv1 "github.com/agynio/networks/.gen/go/agynio/api/agents/v1"
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
+	egressv1 "github.com/agynio/networks/.gen/go/agynio/api/egress/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
 	networksv1 "github.com/agynio/networks/.gen/go/agynio/api/networks/v1"
@@ -66,6 +67,7 @@ func run() error {
 		identityClient      identityv1.IdentityServiceClient
 		groupsClient        groupsv1.GroupsServiceClient
 		agentsClient        agentsv1.AgentsServiceClient
+		egressRulesClient   egressv1.EgressRulesServiceClient
 		zitiClient          zitimgmtv1.ZitiManagementServiceClient
 		notificationsClient notificationsv1.NotificationsServiceClient
 		eventPublisher      server.EventPublisher
@@ -107,6 +109,13 @@ func run() error {
 		defer closeConn(agentsConn)
 		agentsClient = agentsv1.NewAgentsServiceClient(agentsConn)
 
+		egressRulesConn, err := grpc.NewClient(cfg.EgressRulesGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("connect to egress rules: %w", err)
+		}
+		defer closeConn(egressRulesConn)
+		egressRulesClient = egressv1.NewEgressRulesServiceClient(egressRulesConn)
+
 		notificationsConn, err := grpc.NewClient(cfg.NotificationsGRPCTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			return fmt.Errorf("connect to notifications: %w", err)
@@ -130,7 +139,7 @@ func run() error {
 
 	grpcServer := grpc.NewServer()
 	networksStore := store.New(pool)
-	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher).WithAgentsClient(agentsClient)
+	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher).WithAgentsClient(agentsClient).WithEgressRulesClient(egressRulesClient)
 	if err := networksServer.Reconcile(ctx); err != nil {
 		return fmt.Errorf("initial reconciliation: %w", err)
 	}

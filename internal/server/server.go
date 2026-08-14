@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	agentsv1 "github.com/agynio/networks/.gen/go/agynio/api/agents/v1"
 	authorizationv1 "github.com/agynio/networks/.gen/go/agynio/api/authorization/v1"
+	egressv1 "github.com/agynio/networks/.gen/go/agynio/api/egress/v1"
 	groupsv1 "github.com/agynio/networks/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/networks/.gen/go/agynio/api/identity/v1"
 	networksv1 "github.com/agynio/networks/.gen/go/agynio/api/networks/v1"
@@ -55,6 +57,9 @@ type Store interface {
 	ListAllPrivateResourceAccessFiltered(context.Context, store.ListPrivateResourceAccessFilterAll) ([]store.PrivateResourceAccess, error)
 	ListPrivateResourceAccessByGroupID(context.Context, uuid.UUID) ([]store.PrivateResourceAccess, error)
 	DeletePrivateResourceAccess(context.Context, uuid.UUID) error
+	UpdatePrivateResourceMediation(context.Context, uuid.UUID, store.Mediation, store.ProvisioningState, map[int32]string, string) (store.PrivateResource, error)
+	ListPrivateResourceAccessByPrincipals(context.Context, []store.Principal) ([]store.PrivateResourceAccess, error)
+	ListPrivateResourcesByIDs(context.Context, []uuid.UUID) ([]store.PrivateResource, error)
 }
 
 type authorizationClient interface {
@@ -67,6 +72,9 @@ type identityClient interface {
 
 type groupsClient interface {
 	GetGroup(context.Context, *groupsv1.GetGroupRequest, ...grpc.CallOption) (*groupsv1.GetGroupResponse, error)
+	// Internal batch variant: the reachability expansion runs with no caller
+	// identity to forward, which the per-member RPC would refuse.
+	ListMemberGroupsBatch(context.Context, *groupsv1.ListMemberGroupsBatchRequest, ...grpc.CallOption) (*groupsv1.ListMemberGroupsBatchResponse, error)
 }
 
 // agentsClient resolves an environment principal. An environment is a
@@ -74,6 +82,13 @@ type groupsClient interface {
 // registry and the usual GetIdentityType path cannot see it.
 type agentsClient interface {
 	GetEnvironment(context.Context, *agentsv1.GetEnvironmentRequest, ...grpc.CallOption) (*agentsv1.GetEnvironmentResponse, error)
+	GetAgent(context.Context, *agentsv1.GetAgentRequest, ...grpc.CallOption) (*agentsv1.GetAgentResponse, error)
+}
+
+type egressRulesClient interface {
+	CountRulesReferencingPrivateResource(context.Context, *egressv1.CountRulesReferencingPrivateResourceRequest, ...grpc.CallOption) (*egressv1.CountRulesReferencingPrivateResourceResponse, error)
+	ListMediatedPrivateResources(context.Context, *egressv1.ListMediatedPrivateResourcesRequest, ...grpc.CallOption) (*egressv1.ListMediatedPrivateResourcesResponse, error)
+	ListAttachedRuleDomains(context.Context, *egressv1.ListAttachedRuleDomainsRequest, ...grpc.CallOption) (*egressv1.ListAttachedRuleDomainsResponse, error)
 }
 
 type notificationsClient interface {
@@ -93,6 +108,7 @@ type Server struct {
 	zitiManagementClient zitiManagementClient
 	notificationsClient  notificationsClient
 	eventPublisher       eventPublisher
+	egressRulesClient    egressRulesClient
 	now                  func() time.Time
 }
 
@@ -111,6 +127,14 @@ func NewWithDependencies(store Store, authorizationClient authorizationClient, i
 // other principal type resolves without it.
 func (s *Server) WithAgentsClient(client agentsClient) *Server {
 	s.agentsClient = client
+	return s
+}
+
+// WithEgressRulesClient supplies the client behind the referential-integrity
+// guards, the mediation re-derivation, and the collision fast-fail. Nil skips
+// all three.
+func (s *Server) WithEgressRulesClient(client egressRulesClient) *Server {
+	s.egressRulesClient = client
 	return s
 }
 
@@ -390,10 +414,20 @@ func (s *Server) GetPrivateResource(ctx context.Context, request *networksv1.Get
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	if err := s.requireOrganizationMember(ctx, resource.OrganizationID); err != nil {
-		return nil, err
+	// A call without caller metadata cannot have come through the Gateway,
+	// which always stamps the identity -- it is a mesh-internal service call
+	// (the EgressRules service validating and denormalizing rule targets).
+	if hasCallerIdentity(ctx) {
+		if err := s.requireOrganizationMember(ctx, resource.OrganizationID); err != nil {
+			return nil, err
+		}
 	}
 	return &networksv1.GetPrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
+}
+
+func hasCallerIdentity(ctx context.Context) bool {
+	_, err := callerIdentityID(ctx)
+	return err == nil
 }
 
 func (s *Server) ListPrivateResources(ctx context.Context, request *networksv1.ListPrivateResourcesRequest) (*networksv1.ListPrivateResourcesResponse, error) {
@@ -459,6 +493,11 @@ func (s *Server) UpdatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, err
 	}
+	if input.Protocol != nil && *input.Protocol == store.PrivateResourceProtocolTCP && current.Protocol != store.PrivateResourceProtocolTCP {
+		if err := s.requireNoReferencingRules(ctx, id, "change the protocol of"); err != nil {
+			return nil, err
+		}
+	}
 	resource, err := s.store.UpdatePrivateResource(ctx, input)
 	if err != nil {
 		return nil, toStatus(err)
@@ -474,8 +513,101 @@ func (s *Server) UpdatePrivateResource(ctx context.Context, request *networksv1.
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	// A mediated resource's upstream services encode the port pairing and
+	// target host; converge them with the updated row.
+	if resource.Mediation == store.MediationEgressGateway {
+		result := s.materializeMediation(ctx, resource)
+		resource, err = s.store.UpdatePrivateResourceMediation(ctx, resource.Meta.ID, resource.Mediation, result.State, result.UpstreamServiceIDs, result.GatewayDialPolicyID)
+		if err != nil {
+			return nil, toStatus(err)
+		}
+	}
 	s.publishPrivateResourceUpdated(ctx, resource)
 	return &networksv1.UpdatePrivateResourceResponse{PrivateResource: convertPrivateResource(resource)}, nil
+}
+
+// Best-effort fast-fail: granting a resource to a principal already holding a
+// public egress rule for the same hostname would make its dials ambiguous.
+// Only agents and environments can hold rules, expansion runs on the egress
+// side, and an unreachable EgressRules service skips the check rather than
+// blocking the grant -- reconciliation detection is what holds.
+func (s *Server) rejectRuleDomainCollision(ctx context.Context, resource store.PrivateResource, principalType store.PrincipalType, principalID uuid.UUID) error {
+	if s.egressRulesClient == nil {
+		return nil
+	}
+	requests := []*egressv1.ListAttachedRuleDomainsRequest{}
+	switch principalType {
+	case store.PrincipalTypeAgent:
+		requests = append(requests, &egressv1.ListAttachedRuleDomainsRequest{Principal: &egressv1.ListAttachedRuleDomainsRequest_AgentId{AgentId: principalID.String()}})
+		// A rule attached to the agent's environment reaches its workloads too.
+		if s.agentsClient != nil {
+			agent, err := s.agentsClient.GetAgent(ctx, &agentsv1.GetAgentRequest{Id: principalID.String()})
+			if err != nil {
+				log.Printf("resolve agent %s environment failed: %v", principalID, err)
+			} else if environmentID := agent.GetAgent().GetEnvironmentId(); environmentID != "" {
+				requests = append(requests, &egressv1.ListAttachedRuleDomainsRequest{Principal: &egressv1.ListAttachedRuleDomainsRequest_EnvironmentId{EnvironmentId: environmentID}})
+			}
+		}
+	case store.PrincipalTypeEnvironment:
+		requests = append(requests, &egressv1.ListAttachedRuleDomainsRequest{Principal: &egressv1.ListAttachedRuleDomainsRequest_EnvironmentId{EnvironmentId: principalID.String()}})
+	default:
+		return nil
+	}
+	for _, request := range requests {
+		response, err := s.egressRulesClient.ListAttachedRuleDomains(ctx, request)
+		if err != nil {
+			log.Printf("list attached rule domains for %s %s failed: %v", principalType, principalID, err)
+			return nil
+		}
+		for _, domain := range response.GetDomains() {
+			if domainPatternMatchesHost(domain.GetDomainPattern(), resource.InterceptHost) && portsOverlap(domain.GetPorts(), resource.InterceptPorts) {
+				return status.Errorf(codes.FailedPrecondition, "egress rule %s already intercepts %s for this principal; use a rule with this resource as its destination instead", domain.GetEgressRuleId(), resource.InterceptHost)
+			}
+		}
+	}
+	return nil
+}
+
+// Matches the sidecar's interception semantics: exact hostname or a
+// single-label "*." wildcard.
+func domainPatternMatchesHost(pattern string, host string) bool {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	host = strings.ToLower(strings.TrimSpace(host))
+	if pattern == "" || host == "" {
+		return false
+	}
+	if rest, ok := strings.CutPrefix(pattern, "*."); ok {
+		label, remainder, found := strings.Cut(host, ".")
+		return found && label != "" && remainder == rest
+	}
+	return pattern == host
+}
+
+func portsOverlap(rulePorts []int32, interceptPorts []int32) bool {
+	for _, rulePort := range rulePorts {
+		for _, interceptPort := range interceptPorts {
+			if rulePort == interceptPort {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The referential-integrity guard: a resource named by egress rules cannot be
+// deleted or lose its HTTP shape -- the operator deletes those rules first.
+func (s *Server) requireNoReferencingRules(ctx context.Context, resourceID uuid.UUID, action string) error {
+	if s.egressRulesClient == nil {
+		return nil
+	}
+	response, err := s.egressRulesClient.CountRulesReferencingPrivateResource(ctx, &egressv1.CountRulesReferencingPrivateResourceRequest{PrivateResourceId: resourceID.String()})
+	if err != nil {
+		return status.Errorf(codes.Internal, "count referencing egress rules: %v", err)
+	}
+	if response.GetCount() > 0 {
+		return status.Errorf(codes.FailedPrecondition, "cannot %s private resource %s: named by egress rules %s", action, resourceID, strings.Join(response.GetEgressRuleIds(), ", "))
+	}
+	return nil
 }
 
 func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.DeletePrivateResourceRequest) (*networksv1.DeletePrivateResourceResponse, error) {
@@ -490,6 +622,9 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 	if err := s.requireOrganizationOwner(ctx, resource.OrganizationID); err != nil {
 		return nil, err
 	}
+	if err := s.requireNoReferencingRules(ctx, id, "delete"); err != nil {
+		return nil, err
+	}
 	accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{PrivateResourceID: &id})
 	if err != nil {
 		return nil, toStatus(err)
@@ -502,6 +637,9 @@ func (s *Server) DeletePrivateResource(ctx context.Context, request *networksv1.
 					return nil, status.Errorf(codes.Internal, "delete OpenZiti dial policy: %v", err)
 				}
 			}
+		}
+		if err := s.deleteMediationZitiResources(ctx, resource); err != nil {
+			return nil, status.Errorf(codes.Internal, "delete OpenZiti mediation resources: %v", err)
 		}
 		if resource.OpenZitiServiceID != "" {
 			_, err := s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: resource.OpenZitiServiceID})
@@ -543,6 +681,9 @@ func (s *Server) CreatePrivateResourceAccess(ctx context.Context, request *netwo
 		return nil, err
 	}
 	if err := s.validatePrincipalSameOrg(ctx, principalType, principalID, resource.OrganizationID); err != nil {
+		return nil, err
+	}
+	if err := s.rejectRuleDomainCollision(ctx, resource, principalType, principalID); err != nil {
 		return nil, err
 	}
 	access, err := s.store.CreatePrivateResourceAccess(ctx, store.CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resourceID, PrincipalType: principalType, PrincipalID: principalID})
@@ -608,6 +749,135 @@ func (s *Server) ListPrivateResourceAccess(ctx context.Context, request *network
 		response.PrivateResourceAccess = append(response.PrivateResourceAccess, convertPrivateResourceAccess(access))
 	}
 	return response, nil
+}
+
+// Internal-only: called by the EgressRules service on a resource's first rule
+// and last. No caller check -- mediation is derived from which rules exist,
+// and the caller-facing check ran on the rule.
+func (s *Server) SetPrivateResourceMediation(ctx context.Context, request *networksv1.SetPrivateResourceMediationRequest) (*networksv1.SetPrivateResourceMediationResponse, error) {
+	id, err := parseUUIDField("id", request.GetId())
+	if err != nil {
+		return nil, err
+	}
+	mediation, err := toStoreMediation(request.GetMediation())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "mediation: %v", err)
+	}
+	resource, err := s.store.GetPrivateResource(ctx, id)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	mediationChanged := resource.Mediation != mediation
+	if mediationChanged {
+		resource, err = s.store.UpdatePrivateResourceMediation(ctx, id, mediation, resource.ProvisioningState, resource.OpenZitiUpstreamServiceIDs, resource.OpenZitiGatewayDialPolicyID)
+		if err != nil {
+			return nil, toStatus(err)
+		}
+	}
+	result := s.materializeMediation(ctx, resource)
+	resource, err = s.store.UpdatePrivateResourceMediation(ctx, id, mediation, result.State, result.UpstreamServiceIDs, result.GatewayDialPolicyID)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	if mediationChanged {
+		s.publishPrivateResourceUpdated(ctx, resource)
+	}
+	return &networksv1.SetPrivateResourceMediationResponse{PrivateResource: convertPrivateResource(resource)}, nil
+}
+
+// Internal-only: called by the EgressRules service for the attach-time
+// collision fast-fail and the reconciliation collision report.
+func (s *Server) ListPrivateResourcesReachableBy(ctx context.Context, request *networksv1.ListPrivateResourcesReachableByRequest) (*networksv1.ListPrivateResourcesReachableByResponse, error) {
+	principals, err := s.expandReachabilityPrincipals(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	accesses, err := s.store.ListPrivateResourceAccessByPrincipals(ctx, principals)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	resourceIDs := make([]uuid.UUID, 0, len(accesses))
+	grantsByResource := map[uuid.UUID][]*networksv1.ReachablePrivateResourceGrant{}
+	for _, access := range accesses {
+		if _, seen := grantsByResource[access.PrivateResourceID]; !seen {
+			resourceIDs = append(resourceIDs, access.PrivateResourceID)
+		}
+		grantsByResource[access.PrivateResourceID] = append(grantsByResource[access.PrivateResourceID], &networksv1.ReachablePrivateResourceGrant{
+			PrincipalType: convertPrincipalType(access.PrincipalType),
+			PrincipalId:   access.PrincipalID.String(),
+		})
+	}
+	resources, err := s.store.ListPrivateResourcesByIDs(ctx, resourceIDs)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	response := &networksv1.ListPrivateResourcesReachableByResponse{PrivateResources: make([]*networksv1.ReachablePrivateResource, 0, len(resources))}
+	for _, resource := range resources {
+		response.PrivateResources = append(response.PrivateResources, &networksv1.ReachablePrivateResource{
+			Id:             resource.Meta.ID.String(),
+			InterceptHost:  resource.InterceptHost,
+			InterceptPorts: append([]int32{}, resource.InterceptPorts...),
+			Grants:         grantsByResource[resource.Meta.ID],
+		})
+	}
+	return response, nil
+}
+
+// A grant reaches an agent through the agent itself, any group it belongs to,
+// and the environment it runs; an environment principal only through itself.
+// Expansion failures shrink the answer rather than failing it -- both callers
+// are best-effort checks backed by reconciliation detection.
+func (s *Server) expandReachabilityPrincipals(ctx context.Context, request *networksv1.ListPrivateResourcesReachableByRequest) ([]store.Principal, error) {
+	switch principal := request.GetPrincipal().(type) {
+	case *networksv1.ListPrivateResourcesReachableByRequest_AgentId:
+		agentID, err := parseUUIDField("agent_id", principal.AgentId)
+		if err != nil {
+			return nil, err
+		}
+		principals := []store.Principal{{Type: store.PrincipalTypeAgent, ID: agentID}}
+		if s.agentsClient != nil {
+			agent, err := s.agentsClient.GetAgent(ctx, &agentsv1.GetAgentRequest{Id: agentID.String()})
+			if err != nil {
+				log.Printf("resolve agent %s environment failed: %v", agentID, err)
+			} else if environmentID, parseErr := uuid.Parse(agent.GetAgent().GetEnvironmentId()); parseErr == nil {
+				principals = append(principals, store.Principal{Type: store.PrincipalTypeEnvironment, ID: environmentID})
+			}
+		}
+		principals = append(principals, s.memberGroupPrincipals(ctx, groupsv1.GroupMemberType_GROUP_MEMBER_TYPE_AGENT, agentID)...)
+		return principals, nil
+	case *networksv1.ListPrivateResourcesReachableByRequest_EnvironmentId:
+		environmentID, err := parseUUIDField("environment_id", principal.EnvironmentId)
+		if err != nil {
+			return nil, err
+		}
+		return []store.Principal{{Type: store.PrincipalTypeEnvironment, ID: environmentID}}, nil
+	default:
+		return nil, status.Error(codes.InvalidArgument, "principal is required")
+	}
+}
+
+func (s *Server) memberGroupPrincipals(ctx context.Context, memberType groupsv1.GroupMemberType, memberID uuid.UUID) []store.Principal {
+	if s.groupsClient == nil {
+		return nil
+	}
+	response, err := s.groupsClient.ListMemberGroupsBatch(ctx, &groupsv1.ListMemberGroupsBatchRequest{
+		Members: []*groupsv1.ListMemberGroupsRequest{{MemberType: memberType, MemberId: memberID.String()}},
+	})
+	if err != nil {
+		log.Printf("list member groups for %s failed: %v", memberID, err)
+		return nil
+	}
+	principals := []store.Principal{}
+	for _, entry := range response.GetEntries() {
+		for _, group := range entry.GetGroups() {
+			groupID, err := uuid.Parse(group.GetMeta().GetId())
+			if err != nil {
+				continue
+			}
+			principals = append(principals, store.Principal{Type: store.PrincipalTypeGroup, ID: groupID})
+		}
+	}
+	return principals
 }
 
 func createPrivateResourceInput(request *networksv1.CreatePrivateResourceRequest, network store.Network) (store.CreatePrivateResourceInput, error) {
@@ -976,6 +1246,27 @@ func convertPrivateResource(resource store.PrivateResource) *networksv1.PrivateR
 		InterceptHost:     resource.InterceptHost,
 		InterceptPorts:    append([]int32{}, resource.InterceptPorts...),
 		ProvisioningState: convertProvisioningState(resource.ProvisioningState),
+		Mediation:         convertMediation(resource.Mediation),
+	}
+}
+
+func convertMediation(mediation store.Mediation) networksv1.PrivateResourceMediation {
+	switch mediation {
+	case store.MediationEgressGateway:
+		return networksv1.PrivateResourceMediation_PRIVATE_RESOURCE_MEDIATION_EGRESS_GATEWAY
+	default:
+		return networksv1.PrivateResourceMediation_PRIVATE_RESOURCE_MEDIATION_TUNNEL
+	}
+}
+
+func toStoreMediation(mediation networksv1.PrivateResourceMediation) (store.Mediation, error) {
+	switch mediation {
+	case networksv1.PrivateResourceMediation_PRIVATE_RESOURCE_MEDIATION_TUNNEL:
+		return store.MediationTunnel, nil
+	case networksv1.PrivateResourceMediation_PRIVATE_RESOURCE_MEDIATION_EGRESS_GATEWAY:
+		return store.MediationEgressGateway, nil
+	default:
+		return "", fmt.Errorf("unsupported mediation %s", mediation)
 	}
 }
 

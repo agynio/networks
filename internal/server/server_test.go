@@ -230,7 +230,10 @@ func (f *fakeIdentityClient) GetIdentityType(_ context.Context, request *identit
 	return &identityv1.GetIdentityTypeResponse{IdentityType: identityType}, nil
 }
 
-type fakeGroupsClient struct{ groups map[string]*groupsv1.Group }
+type fakeGroupsClient struct {
+	groups       map[string]*groupsv1.Group
+	memberGroups map[string][]*groupsv1.Group
+}
 
 func (f *fakeGroupsClient) GetGroup(_ context.Context, request *groupsv1.GetGroupRequest, _ ...grpc.CallOption) (*groupsv1.GetGroupResponse, error) {
 	group, ok := f.groups[request.GetId()]
@@ -238,6 +241,18 @@ func (f *fakeGroupsClient) GetGroup(_ context.Context, request *groupsv1.GetGrou
 		return nil, status.Error(codes.NotFound, "group not found")
 	}
 	return &groupsv1.GetGroupResponse{Group: group}, nil
+}
+
+func (f *fakeGroupsClient) ListMemberGroupsBatch(_ context.Context, request *groupsv1.ListMemberGroupsBatchRequest, _ ...grpc.CallOption) (*groupsv1.ListMemberGroupsBatchResponse, error) {
+	response := &groupsv1.ListMemberGroupsBatchResponse{}
+	for _, member := range request.GetMembers() {
+		response.Entries = append(response.Entries, &groupsv1.ListMemberGroupsBatchEntry{
+			MemberType: member.GetMemberType(),
+			MemberId:   member.GetMemberId(),
+			Groups:     f.memberGroups[member.GetMemberId()],
+		})
+	}
+	return response, nil
 }
 
 type fakeStore struct {
@@ -466,6 +481,42 @@ func (f *fakeStore) ListPrivateResourceAccessByGroupID(_ context.Context, groupI
 	for _, value := range f.accesses {
 		if value.PrincipalType == store.PrincipalTypeGroup && value.PrincipalID == groupID {
 			values = append(values, value)
+		}
+	}
+	return values, nil
+}
+
+func (f *fakeStore) UpdatePrivateResourceMediation(_ context.Context, id uuid.UUID, mediation store.Mediation, state store.ProvisioningState, upstreamServiceIDs map[int32]string, gatewayDialPolicyID string) (store.PrivateResource, error) {
+	resource, ok := f.resources[id]
+	if !ok {
+		return store.PrivateResource{}, store.NotFound("private resource")
+	}
+	resource.Mediation = mediation
+	resource.ProvisioningState = state
+	resource.OpenZitiUpstreamServiceIDs = upstreamServiceIDs
+	resource.OpenZitiGatewayDialPolicyID = gatewayDialPolicyID
+	f.resources[id] = resource
+	return resource, nil
+}
+
+func (f *fakeStore) ListPrivateResourceAccessByPrincipals(_ context.Context, principals []store.Principal) ([]store.PrivateResourceAccess, error) {
+	values := []store.PrivateResourceAccess{}
+	for _, value := range f.accesses {
+		for _, principal := range principals {
+			if value.PrincipalType == principal.Type && value.PrincipalID == principal.ID {
+				values = append(values, value)
+				break
+			}
+		}
+	}
+	return values, nil
+}
+
+func (f *fakeStore) ListPrivateResourcesByIDs(_ context.Context, ids []uuid.UUID) ([]store.PrivateResource, error) {
+	values := []store.PrivateResource{}
+	for _, id := range ids {
+		if resource, ok := f.resources[id]; ok {
+			values = append(values, resource)
 		}
 	}
 	return values, nil

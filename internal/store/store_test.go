@@ -242,3 +242,51 @@ func TestStoreProvisioningLivenessAndGroupGrantQueries(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, groupAccesses)
 }
+
+func TestStoreMediationRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	orgID := uuid.New()
+	networkID := uuid.New()
+	resourceID := uuid.New()
+
+	_, err := store.CreateNetwork(ctx, CreateNetworkInput{ID: networkID, OrganizationID: orgID, Name: "corp"})
+	require.NoError(t, err)
+	resource, err := store.CreatePrivateResource(ctx, CreatePrivateResourceInput{
+		ID: resourceID, OrganizationID: orgID, NetworkID: networkID, Name: "gitlab",
+		Protocol: PrivateResourceProtocolHTTPS, TargetHost: "gitlab.lan",
+		TargetPorts: []int32{8443, 8080}, InterceptHost: "gitlab.corp", InterceptPorts: []int32{443, 80},
+	})
+	require.NoError(t, err)
+	require.Equal(t, MediationTunnel, resource.Mediation)
+	require.Empty(t, resource.OpenZitiUpstreamServiceIDs)
+
+	resource, err = store.UpdatePrivateResourceMediation(ctx, resourceID, MediationEgressGateway, ProvisioningStateActive, map[int32]string{443: "svc-443", 80: "svc-80"}, "policy-1")
+	require.NoError(t, err)
+	require.Equal(t, MediationEgressGateway, resource.Mediation)
+	require.Equal(t, map[int32]string{443: "svc-443", 80: "svc-80"}, resource.OpenZitiUpstreamServiceIDs)
+	require.Equal(t, "policy-1", resource.OpenZitiGatewayDialPolicyID)
+
+	fetched, err := store.GetPrivateResource(ctx, resourceID)
+	require.NoError(t, err)
+	require.Equal(t, map[int32]string{443: "svc-443", 80: "svc-80"}, fetched.OpenZitiUpstreamServiceIDs)
+
+	resource, err = store.UpdatePrivateResourceMediation(ctx, resourceID, MediationTunnel, ProvisioningStateActive, nil, "")
+	require.NoError(t, err)
+	require.Equal(t, MediationTunnel, resource.Mediation)
+	require.Empty(t, resource.OpenZitiUpstreamServiceIDs)
+
+	principals := []Principal{{Type: PrincipalTypeAgent, ID: uuid.New()}}
+	reachable, err := store.ListPrivateResourceAccessByPrincipals(ctx, principals)
+	require.NoError(t, err)
+	require.Empty(t, reachable)
+	_, err = store.CreatePrivateResourceAccess(ctx, CreatePrivateResourceAccessInput{ID: uuid.New(), PrivateResourceID: resourceID, PrincipalType: PrincipalTypeAgent, PrincipalID: principals[0].ID})
+	require.NoError(t, err)
+	reachable, err = store.ListPrivateResourceAccessByPrincipals(ctx, principals)
+	require.NoError(t, err)
+	require.Len(t, reachable, 1)
+	byID, err := store.ListPrivateResourcesByIDs(ctx, []uuid.UUID{resourceID})
+	require.NoError(t, err)
+	require.Len(t, byID, 1)
+	require.Equal(t, "gitlab.corp", byID[0].InterceptHost)
+}

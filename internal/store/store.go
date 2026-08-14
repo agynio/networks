@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,7 +19,7 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 const networkColumns = `id, organization_id, name, description, provisioning_state, openziti_bind_policy_id, created_at, updated_at`
 const tunnelCredentialColumns = `tunnel_credentials.id, tunnel_credentials.network_id, networks.organization_id, tunnel_credentials.openziti_identity_id, tunnel_credentials.enrollment_jwt_revealed, tunnel_credentials.enrollment_jwt_expires_at, tunnel_credentials.enrollment_state, tunnel_credentials.connectivity, tunnel_credentials.provisioning_state, tunnel_credentials.enrolled_at, tunnel_credentials.last_seen_at, tunnel_credentials.created_at, tunnel_credentials.updated_at`
 const tunnelCredentialInsertColumns = `id, network_id, (SELECT organization_id FROM networks WHERE networks.id = tunnel_credentials.network_id), openziti_identity_id, enrollment_jwt_revealed, enrollment_jwt_expires_at, enrollment_state, connectivity, provisioning_state, enrolled_at, last_seen_at, created_at, updated_at`
-const privateResourceColumns = `id, organization_id, network_id, name, protocol, target_host, target_ports, intercept_host, intercept_ports, provisioning_state, openziti_service_id, created_at, updated_at`
+const privateResourceColumns = `id, organization_id, network_id, name, protocol, target_host, target_ports, intercept_host, intercept_ports, provisioning_state, openziti_service_id, mediation, openziti_upstream_service_ids, openziti_gateway_dial_policy_id, created_at, updated_at`
 const privateResourceAccessColumns = `private_resource_accesses.id, private_resource_accesses.private_resource_id, private_resources.organization_id, private_resources.network_id, private_resource_accesses.principal_type, private_resource_accesses.principal_id, private_resource_accesses.provisioning_state, private_resource_accesses.openziti_dial_policy_id, private_resource_accesses.created_at, private_resource_accesses.updated_at`
 const privateResourceAccessInsertColumns = `id, private_resource_id, (SELECT organization_id FROM private_resources WHERE private_resources.id = private_resource_accesses.private_resource_id), (SELECT network_id FROM private_resources WHERE private_resources.id = private_resource_accesses.private_resource_id), principal_type, principal_id, provisioning_state, openziti_dial_policy_id, created_at, updated_at`
 
@@ -68,6 +69,23 @@ func (s *Store) UpdatePrivateResourceProvisioning(ctx context.Context, id uuid.U
 	resource, err := scanPrivateResource(s.pool.QueryRow(ctx,
 		fmt.Sprintf(`UPDATE private_resources SET provisioning_state = $1, openziti_service_id = $2, updated_at = NOW() WHERE id = $3 RETURNING %s`, privateResourceColumns),
 		normalizeProvisioningState(state), openZitiServiceID, id,
+	))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PrivateResource{}, NotFound("private resource")
+		}
+		return PrivateResource{}, err
+	}
+	return resource, nil
+}
+
+func (s *Store) UpdatePrivateResourceMediation(ctx context.Context, id uuid.UUID, mediation Mediation, state ProvisioningState, upstreamServiceIDs map[int32]string, gatewayDialPolicyID string) (PrivateResource, error) {
+	if upstreamServiceIDs == nil {
+		upstreamServiceIDs = map[int32]string{}
+	}
+	resource, err := scanPrivateResource(s.pool.QueryRow(ctx,
+		fmt.Sprintf(`UPDATE private_resources SET mediation = $1, provisioning_state = $2, openziti_upstream_service_ids = $3, openziti_gateway_dial_policy_id = $4, updated_at = NOW() WHERE id = $5 RETURNING %s`, privateResourceColumns),
+		mediation, normalizeProvisioningState(state), upstreamServiceIDs, gatewayDialPolicyID, id,
 	))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -448,6 +466,37 @@ func (s *Store) ListAllPrivateResourceAccessFiltered(ctx context.Context, filter
 	return scanRows(rows, scanPrivateResourceAccess)
 }
 
+func (s *Store) ListPrivateResourceAccessByPrincipals(ctx context.Context, principals []Principal) ([]PrivateResourceAccess, error) {
+	if len(principals) == 0 {
+		return nil, nil
+	}
+	clauses := make([]string, 0, len(principals))
+	args := make([]any, 0, 2*len(principals))
+	for _, principal := range principals {
+		clauses = append(clauses, fmt.Sprintf("(private_resource_accesses.principal_type = $%d AND private_resource_accesses.principal_id = $%d)", len(args)+1, len(args)+2))
+		args = append(args, principal.Type, principal.ID)
+	}
+	query := fmt.Sprintf(`SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id WHERE %s ORDER BY private_resource_accesses.id`, privateResourceAccessColumns, strings.Join(clauses, " OR "))
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanPrivateResourceAccess)
+}
+
+func (s *Store) ListPrivateResourcesByIDs(ctx context.Context, ids []uuid.UUID) ([]PrivateResource, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resources WHERE id = ANY($1) ORDER BY id`, privateResourceColumns), ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanPrivateResource)
+}
+
 func (s *Store) ListPrivateResourceAccessByGroupID(ctx context.Context, groupID uuid.UUID) ([]PrivateResourceAccess, error) {
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM private_resource_accesses JOIN private_resources ON private_resources.id = private_resource_accesses.private_resource_id WHERE principal_type = $1 AND principal_id = $2 ORDER BY private_resource_accesses.id`, privateResourceAccessColumns), PrincipalTypeGroup, groupID)
 	if err != nil {
@@ -489,7 +538,7 @@ func scanTunnelCredential(row pgx.Row) (TunnelCredential, error) {
 
 func scanPrivateResource(row pgx.Row) (PrivateResource, error) {
 	var resource PrivateResource
-	err := row.Scan(&resource.Meta.ID, &resource.OrganizationID, &resource.NetworkID, &resource.Name, &resource.Protocol, &resource.TargetHost, &resource.TargetPorts, &resource.InterceptHost, &resource.InterceptPorts, &resource.ProvisioningState, &resource.OpenZitiServiceID, &resource.Meta.CreatedAt, &resource.Meta.UpdatedAt)
+	err := row.Scan(&resource.Meta.ID, &resource.OrganizationID, &resource.NetworkID, &resource.Name, &resource.Protocol, &resource.TargetHost, &resource.TargetPorts, &resource.InterceptHost, &resource.InterceptPorts, &resource.ProvisioningState, &resource.OpenZitiServiceID, &resource.Mediation, &resource.OpenZitiUpstreamServiceIDs, &resource.OpenZitiGatewayDialPolicyID, &resource.Meta.CreatedAt, &resource.Meta.UpdatedAt)
 	return resource, err
 }
 

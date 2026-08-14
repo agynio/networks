@@ -18,6 +18,10 @@ const (
 	managedByNetworksService = "networks-service"
 	managedByTagKey          = "agyn.managed_by"
 	openZitiProtocolTCP      = "tcp"
+	// Bound by the Egress Gateway via the static egress-gateway-bind policy.
+	egressServicesRoleAttribute = "egress-services"
+	// The Egress Gateway's identity role, dial side of the upstream policies.
+	egressGatewayHostsRoleAttribute = "egress-gateway-hosts"
 )
 
 type zitiManagementClient interface {
@@ -128,6 +132,130 @@ func (s *Server) provisionPrivateResourceAccess(ctx context.Context, access stor
 	return accessProvisioningResult{State: store.ProvisioningStateActive, DialPolicyID: response.GetZitiServicePolicyId()}
 }
 
+type mediationProvisioningResult struct {
+	State               store.ProvisioningState
+	UpstreamServiceIDs  map[int32]string
+	GatewayDialPolicyID string
+}
+
+// materializeMediation converges the resource's OpenZiti objects with its
+// mediation column. Idempotent: creates adopt existing objects by name and
+// stale upstream services are removed against the current port pairing.
+func (s *Server) materializeMediation(ctx context.Context, resource store.PrivateResource) mediationProvisioningResult {
+	if s.zitiManagementClient == nil {
+		return mediationProvisioningResult{State: store.ProvisioningStateActive}
+	}
+	if resource.Mediation == store.MediationEgressGateway {
+		return s.materializeGatewayMediation(ctx, resource)
+	}
+	return s.materializeTunnelMediation(ctx, resource)
+}
+
+func (s *Server) materializeGatewayMediation(ctx context.Context, resource store.PrivateResource) mediationProvisioningResult {
+	desiredPorts := map[int32]bool{}
+	for _, port := range resource.InterceptPorts {
+		desiredPorts[port] = true
+	}
+	// Start from the stored ids so a partial failure never forgets an object
+	// that exists; stale entries leave the map only once deleted.
+	upstreamIDs := map[int32]string{}
+	for port, serviceID := range resource.OpenZitiUpstreamServiceIDs {
+		if serviceID != "" {
+			upstreamIDs[port] = serviceID
+		}
+	}
+	result := mediationProvisioningResult{
+		State:               store.ProvisioningStateActive,
+		UpstreamServiceIDs:  upstreamIDs,
+		GatewayDialPolicyID: resource.OpenZitiGatewayDialPolicyID,
+	}
+	fail := func(format string, args ...any) mediationProvisioningResult {
+		log.Printf(format, args...)
+		result.State = store.ProvisioningStateFailed
+		return result
+	}
+	if resource.OpenZitiServiceID != "" {
+		if _, err := s.zitiManagementClient.UpdateService(ctx, updatePrivateResourceServiceRequest(resource)); err != nil {
+			return fail("rebind front service for private resource %s failed: %v", resource.Meta.ID, err)
+		}
+	}
+	for i, interceptPort := range resource.InterceptPorts {
+		response, err := s.zitiManagementClient.CreateService(ctx, &zitimgmtv1.CreateServiceRequest{
+			Name:           privateResourceUpstreamServiceName(resource.Meta.ID, interceptPort),
+			RoleAttributes: []string{networkResourcesRoleAttribute(resource.NetworkID), privateResourceUpstreamsRoleAttribute(resource.Meta.ID)},
+			HostV1Config:   upstreamServiceHostV1Config(resource, resource.TargetPorts[i]),
+			Tags:           privateResourceUpstreamTags(resource.NetworkID, resource.Meta.ID),
+			ReturnExisting: true,
+		})
+		if err != nil {
+			return fail("provision upstream service for private resource %s port %d failed: %v", resource.Meta.ID, interceptPort, err)
+		}
+		// An adopted service keeps its old host.v1; converge it to the current
+		// target pairing.
+		if _, err := s.zitiManagementClient.UpdateService(ctx, &zitimgmtv1.UpdateServiceRequest{
+			ZitiServiceId: response.GetZitiServiceId(),
+			HostV1Config:  upstreamServiceHostV1Config(resource, resource.TargetPorts[i]),
+		}); err != nil {
+			return fail("converge upstream service for private resource %s port %d failed: %v", resource.Meta.ID, interceptPort, err)
+		}
+		upstreamIDs[interceptPort] = response.GetZitiServiceId()
+	}
+	for interceptPort, serviceID := range resource.OpenZitiUpstreamServiceIDs {
+		if desiredPorts[interceptPort] || serviceID == "" {
+			continue
+		}
+		if err := ignoreMissing(s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: serviceID})); err != nil {
+			return fail("delete stale upstream service for private resource %s port %d failed: %v", resource.Meta.ID, interceptPort, err)
+		}
+		delete(upstreamIDs, interceptPort)
+	}
+	if result.GatewayDialPolicyID == "" {
+		response, err := s.zitiManagementClient.CreateServicePolicy(ctx, &zitimgmtv1.CreateServicePolicyRequest{
+			Type:           zitimgmtv1.ServicePolicyType_SERVICE_POLICY_TYPE_DIAL,
+			Name:           gatewayDialPolicyName(resource.Meta.ID),
+			IdentityRoles:  []string{zitiRoleSelector(egressGatewayHostsRoleAttribute)},
+			ServiceRoles:   []string{zitiRoleSelector(privateResourceUpstreamsRoleAttribute(resource.Meta.ID))},
+			Tags:           gatewayDialPolicyTags(resource.NetworkID, resource.Meta.ID),
+			ReturnExisting: true,
+		})
+		if err != nil {
+			return fail("provision gateway dial policy for private resource %s failed: %v", resource.Meta.ID, err)
+		}
+		result.GatewayDialPolicyID = response.GetZitiServicePolicyId()
+	}
+	return result
+}
+
+func (s *Server) materializeTunnelMediation(ctx context.Context, resource store.PrivateResource) mediationProvisioningResult {
+	result := mediationProvisioningResult{State: store.ProvisioningStateActive}
+	fail := func(format string, args ...any) mediationProvisioningResult {
+		log.Printf(format, args...)
+		result.State = store.ProvisioningStateFailed
+		result.UpstreamServiceIDs = resource.OpenZitiUpstreamServiceIDs
+		result.GatewayDialPolicyID = resource.OpenZitiGatewayDialPolicyID
+		return result
+	}
+	if resource.OpenZitiServiceID != "" {
+		if _, err := s.zitiManagementClient.UpdateService(ctx, updatePrivateResourceServiceRequest(resource)); err != nil {
+			return fail("rebind front service for private resource %s failed: %v", resource.Meta.ID, err)
+		}
+	}
+	if resource.OpenZitiGatewayDialPolicyID != "" {
+		if err := ignoreMissing(s.zitiManagementClient.DeleteServicePolicy(ctx, &zitimgmtv1.DeleteServicePolicyRequest{ZitiServicePolicyId: resource.OpenZitiGatewayDialPolicyID})); err != nil {
+			return fail("delete gateway dial policy for private resource %s failed: %v", resource.Meta.ID, err)
+		}
+	}
+	for interceptPort, serviceID := range resource.OpenZitiUpstreamServiceIDs {
+		if serviceID == "" {
+			continue
+		}
+		if err := ignoreMissing(s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: serviceID})); err != nil {
+			return fail("delete upstream service for private resource %s port %d failed: %v", resource.Meta.ID, interceptPort, err)
+		}
+	}
+	return result
+}
+
 func (s *Server) deleteNetworkZitiResources(ctx context.Context, network store.Network, credentials []store.TunnelCredential, resources []store.PrivateResource, accesses []store.PrivateResourceAccess) error {
 	if s.zitiManagementClient == nil {
 		return nil
@@ -139,6 +267,7 @@ func (s *Server) deleteNetworkZitiResources(ctx context.Context, network store.N
 		}
 	}
 	for _, resource := range resources {
+		deleteErrors = append(deleteErrors, s.deleteMediationZitiResources(ctx, resource))
 		if resource.OpenZitiServiceID != "" {
 			deleteErrors = append(deleteErrors, ignoreMissing(s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: resource.OpenZitiServiceID})))
 		}
@@ -161,6 +290,22 @@ func ignoreMissing(_ any, err error) error {
 	return err
 }
 
+func (s *Server) deleteMediationZitiResources(ctx context.Context, resource store.PrivateResource) error {
+	if s.zitiManagementClient == nil {
+		return nil
+	}
+	var deleteErrors []error
+	if resource.OpenZitiGatewayDialPolicyID != "" {
+		deleteErrors = append(deleteErrors, ignoreMissing(s.zitiManagementClient.DeleteServicePolicy(ctx, &zitimgmtv1.DeleteServicePolicyRequest{ZitiServicePolicyId: resource.OpenZitiGatewayDialPolicyID})))
+	}
+	for _, serviceID := range resource.OpenZitiUpstreamServiceIDs {
+		if serviceID != "" {
+			deleteErrors = append(deleteErrors, ignoreMissing(s.zitiManagementClient.DeleteService(ctx, &zitimgmtv1.DeleteServiceRequest{ZitiServiceId: serviceID})))
+		}
+	}
+	return errors.Join(deleteErrors...)
+}
+
 func createNetworkBindPolicyRequest(networkID uuid.UUID) *zitimgmtv1.CreateServicePolicyRequest {
 	return &zitimgmtv1.CreateServicePolicyRequest{
 		Type:          zitimgmtv1.ServicePolicyType_SERVICE_POLICY_TYPE_BIND,
@@ -177,8 +322,8 @@ func createNetworkBindPolicyRequest(networkID uuid.UUID) *zitimgmtv1.CreateServi
 func createPrivateResourceServiceRequest(resource store.PrivateResource) *zitimgmtv1.CreateServiceRequest {
 	return &zitimgmtv1.CreateServiceRequest{
 		Name:              privateResourceServiceName(resource.Meta.ID),
-		RoleAttributes:    []string{networkResourcesRoleAttribute(resource.NetworkID), privateResourceRoleAttribute(resource.Meta.ID)},
-		HostV1Config:      hostV1Config(resource),
+		RoleAttributes:    frontServiceRoleAttributes(resource),
+		HostV1Config:      frontHostV1Config(resource),
 		InterceptV1Config: interceptV1Config(resource),
 		Tags:              privateResourceTags(resource.NetworkID, resource.Meta.ID),
 		ReturnExisting:    true,
@@ -187,10 +332,11 @@ func createPrivateResourceServiceRequest(resource store.PrivateResource) *zitimg
 
 func updatePrivateResourceServiceRequest(resource store.PrivateResource) *zitimgmtv1.UpdateServiceRequest {
 	return &zitimgmtv1.UpdateServiceRequest{
-		ZitiServiceId:     resource.OpenZitiServiceID,
-		HostV1Config:      hostV1Config(resource),
-		InterceptV1Config: interceptV1Config(resource),
-		TagsUpdate:        &zitimgmtv1.TagsUpdate{Tags: privateResourceTags(resource.NetworkID, resource.Meta.ID)},
+		ZitiServiceId:        resource.OpenZitiServiceID,
+		HostV1Config:         frontHostV1Config(resource),
+		InterceptV1Config:    interceptV1Config(resource),
+		TagsUpdate:           &zitimgmtv1.TagsUpdate{Tags: privateResourceTags(resource.NetworkID, resource.Meta.ID)},
+		RoleAttributesUpdate: &zitimgmtv1.RoleAttributesUpdate{RoleAttributes: frontServiceRoleAttributes(resource)},
 	}
 }
 
@@ -215,6 +361,42 @@ func hostV1Config(resource store.PrivateResource) *zitimgmtv1.HostV1Config {
 		AllowedProtocols:  []string{openZitiProtocolTCP},
 		AllowedAddresses:  []string{resource.TargetHost},
 		AllowedPortRanges: portRanges(resource.TargetPorts),
+	}
+}
+
+// The mediated front service forwards the dialed address and port to the
+// Egress Gateway; the intercept->target port mapping lives in the upstream
+// services, one per intercept port.
+func frontHostV1Config(resource store.PrivateResource) *zitimgmtv1.HostV1Config {
+	if resource.Mediation != store.MediationEgressGateway {
+		return hostV1Config(resource)
+	}
+	return &zitimgmtv1.HostV1Config{
+		Protocol:          openZitiProtocolTCP,
+		ForwardProtocol:   true,
+		ForwardAddress:    true,
+		ForwardPort:       true,
+		AllowedProtocols:  []string{openZitiProtocolTCP},
+		AllowedAddresses:  []string{resource.InterceptHost},
+		AllowedPortRanges: portRanges(resource.InterceptPorts),
+	}
+}
+
+func frontServiceRoleAttributes(resource store.PrivateResource) []string {
+	if resource.Mediation == store.MediationEgressGateway {
+		return []string{egressServicesRoleAttribute, privateResourceRoleAttribute(resource.Meta.ID)}
+	}
+	return []string{networkResourcesRoleAttribute(resource.NetworkID), privateResourceRoleAttribute(resource.Meta.ID)}
+}
+
+func upstreamServiceHostV1Config(resource store.PrivateResource, targetPort int32) *zitimgmtv1.HostV1Config {
+	return &zitimgmtv1.HostV1Config{
+		Protocol:          openZitiProtocolTCP,
+		Address:           resource.TargetHost,
+		Port:              targetPort,
+		AllowedProtocols:  []string{openZitiProtocolTCP},
+		AllowedAddresses:  []string{resource.TargetHost},
+		AllowedPortRanges: []*zitimgmtv1.PortRange{{Low: targetPort, High: targetPort}},
 	}
 }
 
@@ -243,6 +425,20 @@ func firstPort(ports []int32) int32 {
 
 func privateResourceServiceName(resourceID uuid.UUID) string {
 	return fmt.Sprintf("private-%s", resourceID)
+}
+
+func privateResourceUpstreamServiceName(resourceID uuid.UUID, interceptPort int32) string {
+	return fmt.Sprintf("private-%s-upstream-%d", resourceID, interceptPort)
+}
+
+// Shared by every upstream service of one resource, so the gateway's single
+// Dial policy survives the per-port services being recreated on a port change.
+func privateResourceUpstreamsRoleAttribute(resourceID uuid.UUID) string {
+	return fmt.Sprintf("private-resource-upstreams-%s", resourceID)
+}
+
+func gatewayDialPolicyName(resourceID uuid.UUID) string {
+	return fmt.Sprintf("private-%s-upstreams-egress-gateway-dial", resourceID)
 }
 
 func networkRoleAttribute(networkID uuid.UUID) string {
@@ -297,6 +493,14 @@ func privateResourceTags(networkID uuid.UUID, resourceID uuid.UUID) map[string]s
 
 func privateResourceAccessTags(networkID uuid.UUID, accessID uuid.UUID) map[string]string {
 	return baseZitiTags("resource_access", accessID, networkID)
+}
+
+func privateResourceUpstreamTags(networkID uuid.UUID, resourceID uuid.UUID) map[string]string {
+	return baseZitiTags("private_resource_upstream", resourceID, networkID)
+}
+
+func gatewayDialPolicyTags(networkID uuid.UUID, resourceID uuid.UUID) map[string]string {
+	return baseZitiTags("gateway_dial_policy", resourceID, networkID)
 }
 
 func baseZitiTags(resourceType string, resourceID uuid.UUID, networkID uuid.UUID) map[string]string {

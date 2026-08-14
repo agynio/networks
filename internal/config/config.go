@@ -16,6 +16,7 @@ type Config struct {
 	IdentityGRPCTarget       string
 	AgentsGRPCTarget         string
 	GroupsGRPCTarget         string
+	EgressRulesGRPCTarget    string
 	NotificationsGRPCTarget  string
 	NATSURL                  string
 	TunnelLivenessInterval   time.Duration
@@ -61,6 +62,12 @@ func FromEnv() (Config, error) {
 	cfg.AgentsGRPCTarget = os.Getenv("AGENTS_GRPC_TARGET")
 	if cfg.AgentsGRPCTarget == "" {
 		cfg.AgentsGRPCTarget = "agents:50051"
+	}
+	// Referential-integrity guards, mediation re-derivation, and the
+	// hostname-collision fast-fail on access grants.
+	cfg.EgressRulesGRPCTarget = os.Getenv("EGRESS_RULES_GRPC_TARGET")
+	if cfg.EgressRulesGRPCTarget == "" {
+		cfg.EgressRulesGRPCTarget = "egress:50051"
 	}
 	cfg.NotificationsGRPCTarget = os.Getenv("NOTIFICATIONS_GRPC_TARGET")
 	if cfg.NotificationsGRPCTarget == "" {

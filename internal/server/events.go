@@ -20,6 +20,10 @@ const (
 	accessGrantedSubject     = "agyn.networks.access.granted"
 	accessRevokedSubject     = "agyn.networks.access.revoked"
 	networksNotificationRoom = "org-%s"
+	// Flat, not organization-keyed: the Egress Gateway caches private-target
+	// rules with the resource's fields denormalized and cannot enumerate the
+	// organizations it serves.
+	privateResourcesNotificationRoom = "private_resources"
 
 	networkUpdatedNotification               = "network.updated"
 	tunnelCredentialUpdatedNotification      = "tunnel_credential.updated"
@@ -42,10 +46,12 @@ func (s *Server) publishTunnelCredentialUpdated(ctx context.Context, credential 
 }
 
 func (s *Server) publishPrivateResourceUpdated(ctx context.Context, resource store.PrivateResource) {
-	s.publishNotification(ctx, resource.OrganizationID, privateResourceUpdatedNotification, map[string]any{
-		"private_resource_id": resource.Meta.ID.String(),
-		"network_id":          resource.NetworkID.String(),
-	})
+	s.publishNotificationRooms(ctx,
+		[]string{fmt.Sprintf(networksNotificationRoom, resource.OrganizationID.String()), privateResourcesNotificationRoom},
+		privateResourceUpdatedNotification, map[string]any{
+			"private_resource_id": resource.Meta.ID.String(),
+			"network_id":          resource.NetworkID.String(),
+		})
 }
 
 func (s *Server) publishAccessGranted(ctx context.Context, access store.PrivateResourceAccess) error {
@@ -122,6 +128,10 @@ func (s *Server) publishProtoEvent(ctx context.Context, subject string, envelope
 }
 
 func (s *Server) publishNotification(ctx context.Context, organizationID fmt.Stringer, event string, payload map[string]any) {
+	s.publishNotificationRooms(ctx, []string{fmt.Sprintf(networksNotificationRoom, organizationID.String())}, event, payload)
+}
+
+func (s *Server) publishNotificationRooms(ctx context.Context, rooms []string, event string, payload map[string]any) {
 	if s.notificationsClient == nil {
 		return
 	}
@@ -131,7 +141,7 @@ func (s *Server) publishNotification(ctx context.Context, organizationID fmt.Str
 	}
 	_, err = s.notificationsClient.Publish(ctx, &notificationsv1.PublishRequest{
 		Event:   event,
-		Rooms:   []string{fmt.Sprintf(networksNotificationRoom, organizationID.String())},
+		Rooms:   rooms,
 		Payload: structPayload,
 		Source:  networksEventSource,
 	})

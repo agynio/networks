@@ -97,6 +97,10 @@ env:
   # Resolves environment principals on access grants.
   - name: AGENTS_GRPC_TARGET
     value: "agents:50051"
+  # Referential-integrity guards, mediation re-derivation, and the
+  # hostname-collision fast-fail on access grants.
+  - name: EGRESS_RULES_GRPC_TARGET
+    value: "egress:50051"
   - name: NOTIFICATIONS_GRPC_TARGET
     value: "notifications:50051"
   - name: NATS_URL
