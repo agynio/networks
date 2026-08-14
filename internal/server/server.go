@@ -109,6 +109,7 @@ type Server struct {
 	notificationsClient  notificationsClient
 	eventPublisher       eventPublisher
 	egressRulesClient    egressRulesClient
+	platformIdentityID   string
 	now                  func() time.Time
 }
 
@@ -135,6 +136,13 @@ func (s *Server) WithAgentsClient(client agentsClient) *Server {
 // all three.
 func (s *Server) WithEgressRulesClient(client egressRulesClient) *Server {
 	s.egressRulesClient = client
+	return s
+}
+
+// WithPlatformIdentity supplies the identity named on Groups calls, which
+// have no end user behind them when the reconciliation paths run.
+func (s *Server) WithPlatformIdentity(identityID string) *Server {
+	s.platformIdentityID = identityID
 	return s
 }
 
@@ -835,15 +843,19 @@ func (s *Server) expandReachabilityPrincipals(ctx context.Context, request *netw
 			return nil, err
 		}
 		principals := []store.Principal{{Type: store.PrincipalTypeAgent, ID: agentID}}
+		organizationID := ""
 		if s.agentsClient != nil {
 			agent, err := s.agentsClient.GetAgent(ctx, &agentsv1.GetAgentRequest{Id: agentID.String()})
 			if err != nil {
 				log.Printf("resolve agent %s environment failed: %v", agentID, err)
-			} else if environmentID, parseErr := uuid.Parse(agent.GetAgent().GetEnvironmentId()); parseErr == nil {
-				principals = append(principals, store.Principal{Type: store.PrincipalTypeEnvironment, ID: environmentID})
+			} else {
+				organizationID = agent.GetAgent().GetOrganizationId()
+				if environmentID, parseErr := uuid.Parse(agent.GetAgent().GetEnvironmentId()); parseErr == nil {
+					principals = append(principals, store.Principal{Type: store.PrincipalTypeEnvironment, ID: environmentID})
+				}
 			}
 		}
-		principals = append(principals, s.memberGroupPrincipals(ctx, groupsv1.GroupMemberType_GROUP_MEMBER_TYPE_AGENT, agentID)...)
+		principals = append(principals, s.memberGroupPrincipals(ctx, groupsv1.GroupMemberType_GROUP_MEMBER_TYPE_AGENT, agentID, organizationID)...)
 		return principals, nil
 	case *networksv1.ListPrivateResourcesReachableByRequest_EnvironmentId:
 		environmentID, err := parseUUIDField("environment_id", principal.EnvironmentId)
@@ -856,12 +868,17 @@ func (s *Server) expandReachabilityPrincipals(ctx context.Context, request *netw
 	}
 }
 
-func (s *Server) memberGroupPrincipals(ctx context.Context, memberType groupsv1.GroupMemberType, memberID uuid.UUID) []store.Principal {
-	if s.groupsClient == nil {
+func (s *Server) memberGroupPrincipals(ctx context.Context, memberType groupsv1.GroupMemberType, memberID uuid.UUID, organizationID string) []store.Principal {
+	if s.groupsClient == nil || organizationID == "" {
 		return nil
 	}
+	// Groups requires a caller; the reconciliation paths behind this have no
+	// end user, so the platform identity is named, as the Orchestrator does.
+	if s.platformIdentityID != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, identityIDMetadataKey, s.platformIdentityID, "x-identity-type", "platform")
+	}
 	response, err := s.groupsClient.ListMemberGroupsBatch(ctx, &groupsv1.ListMemberGroupsBatchRequest{
-		Members: []*groupsv1.ListMemberGroupsRequest{{MemberType: memberType, MemberId: memberID.String()}},
+		Members: []*groupsv1.ListMemberGroupsRequest{{MemberType: memberType, MemberId: memberID.String(), OrganizationId: organizationID}},
 	})
 	if err != nil {
 		log.Printf("list member groups for %s failed: %v", memberID, err)

@@ -18,6 +18,7 @@ type Config struct {
 	GroupsGRPCTarget         string
 	EgressRulesGRPCTarget    string
 	NotificationsGRPCTarget  string
+	PlatformIdentityID       string
 	NATSURL                  string
 	TunnelLivenessInterval   time.Duration
 	ReconciliationInterval   time.Duration
@@ -72,6 +73,12 @@ func FromEnv() (Config, error) {
 	cfg.NotificationsGRPCTarget = os.Getenv("NOTIFICATIONS_GRPC_TARGET")
 	if cfg.NotificationsGRPCTarget == "" {
 		cfg.NotificationsGRPCTarget = "notifications:50051"
+	}
+	// The platform's admin identity, named on Groups calls the way the
+	// Agents Orchestrator names it. Same default as its chart.
+	cfg.PlatformIdentityID = os.Getenv("PLATFORM_IDENTITY_ID")
+	if cfg.PlatformIdentityID == "" {
+		cfg.PlatformIdentityID = "a3c1e9d2-7f4b-5e1a-9c3d-2b8f6a4e7d10"
 	}
 	cfg.NATSURL = os.Getenv("NATS_URL")
 	var err error

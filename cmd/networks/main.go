@@ -139,7 +139,7 @@ func run() error {
 
 	grpcServer := grpc.NewServer()
 	networksStore := store.New(pool)
-	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher).WithAgentsClient(agentsClient).WithEgressRulesClient(egressRulesClient)
+	networksServer := server.NewWithDependencies(networksStore, authorizationClient, identityClient, groupsClient, zitiClient, notificationsClient, eventPublisher).WithAgentsClient(agentsClient).WithEgressRulesClient(egressRulesClient).WithPlatformIdentity(cfg.PlatformIdentityID)
 	if err := networksServer.Reconcile(ctx); err != nil {
 		return fmt.Errorf("initial reconciliation: %w", err)
 	}
