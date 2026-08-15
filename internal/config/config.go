@@ -16,7 +16,9 @@ type Config struct {
 	IdentityGRPCTarget       string
 	AgentsGRPCTarget         string
 	GroupsGRPCTarget         string
+	EgressRulesGRPCTarget    string
 	NotificationsGRPCTarget  string
+	PlatformIdentityID       string
 	NATSURL                  string
 	TunnelLivenessInterval   time.Duration
 	ReconciliationInterval   time.Duration
@@ -62,9 +64,21 @@ func FromEnv() (Config, error) {
 	if cfg.AgentsGRPCTarget == "" {
 		cfg.AgentsGRPCTarget = "agents:50051"
 	}
+	// Referential-integrity guards, mediation re-derivation, and the
+	// hostname-collision fast-fail on access grants.
+	cfg.EgressRulesGRPCTarget = os.Getenv("EGRESS_RULES_GRPC_TARGET")
+	if cfg.EgressRulesGRPCTarget == "" {
+		cfg.EgressRulesGRPCTarget = "egress:50051"
+	}
 	cfg.NotificationsGRPCTarget = os.Getenv("NOTIFICATIONS_GRPC_TARGET")
 	if cfg.NotificationsGRPCTarget == "" {
 		cfg.NotificationsGRPCTarget = "notifications:50051"
+	}
+	// The platform's admin identity, named on Groups calls the way the
+	// Agents Orchestrator names it. Same default as its chart.
+	cfg.PlatformIdentityID = os.Getenv("PLATFORM_IDENTITY_ID")
+	if cfg.PlatformIdentityID == "" {
+		cfg.PlatformIdentityID = "a3c1e9d2-7f4b-5e1a-9c3d-2b8f6a4e7d10"
 	}
 	cfg.NATSURL = os.Getenv("NATS_URL")
 	var err error

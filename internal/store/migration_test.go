@@ -40,3 +40,17 @@ func TestEnvironmentPrincipalMigrationExtendsTheEnum(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(content), "ALTER TYPE private_resource_access_principal_type ADD VALUE IF NOT EXISTS 'environment'")
 }
+
+func TestMediationMigrationAddsDerivedState(t *testing.T) {
+	content, err := migrations.Files.ReadFile("0003_private_resource_mediation.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	for _, expected := range []string{
+		"CREATE TYPE private_resource_mediation AS ENUM ('tunnel', 'egress_gateway')",
+		"ADD COLUMN mediation private_resource_mediation NOT NULL DEFAULT 'tunnel'",
+		"ADD COLUMN openziti_upstream_service_ids JSONB NOT NULL DEFAULT '{}'",
+		"ADD COLUMN openziti_gateway_dial_policy_id TEXT NOT NULL DEFAULT ''",
+	} {
+		require.Contains(t, sql, expected)
+	}
+}

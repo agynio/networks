@@ -42,6 +42,13 @@ const (
 	PrivateResourceProtocolHTTPS PrivateResourceProtocol = "https"
 )
 
+type Mediation string
+
+const (
+	MediationTunnel        Mediation = "tunnel"
+	MediationEgressGateway Mediation = "egress_gateway"
+)
+
 type PrincipalType string
 
 const (
@@ -89,6 +96,11 @@ type PrivateResource struct {
 	InterceptPorts    []int32
 	ProvisioningState ProvisioningState
 	OpenZitiServiceID string
+	Mediation         Mediation
+	// OpenZiti service id of private-<id>-upstream-<port> per intercept port.
+	// Non-empty only while Mediation is egress_gateway.
+	OpenZitiUpstreamServiceIDs  map[int32]string
+	OpenZitiGatewayDialPolicyID string
 }
 
 type PrivateResourceAccess struct {
@@ -170,6 +182,11 @@ type ListPrivateResourceAccessFilter struct {
 	NetworkID         *uuid.UUID
 	PrincipalType     *PrincipalType
 	PrincipalID       *uuid.UUID
+}
+
+type Principal struct {
+	Type PrincipalType
+	ID   uuid.UUID
 }
 
 type ListTunnelCredentialsFilter struct {

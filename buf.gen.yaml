@@ -30,3 +30,4 @@ inputs:
       - agynio/api/groups/v1
       - agynio/api/notifications/v1
       - agynio/api/agents/v1
+      - agynio/api/egress/v1

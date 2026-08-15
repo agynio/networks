@@ -18,8 +18,20 @@ import (
 
 type fakeAgentsClient struct {
 	environments map[string]*agentsv1.Environment
+	agents       map[string]*agentsv1.Agent
 	err          error
 	calls        int
+}
+
+func (f *fakeAgentsClient) GetAgent(_ context.Context, request *agentsv1.GetAgentRequest, _ ...grpc.CallOption) (*agentsv1.GetAgentResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	agent, ok := f.agents[request.GetId()]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "agent not found")
+	}
+	return &agentsv1.GetAgentResponse{Agent: agent}, nil
 }
 
 func (f *fakeAgentsClient) GetEnvironment(_ context.Context, request *agentsv1.GetEnvironmentRequest, _ ...grpc.CallOption) (*agentsv1.GetEnvironmentResponse, error) {
