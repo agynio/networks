@@ -138,6 +138,17 @@ func (s *Store) ListAllNetworks(ctx context.Context) ([]Network, error) {
 	return scanRows(rows, scanNetwork)
 }
 
+// ListAllNetworksByOrganization returns every network the organization holds,
+// unpaginated. The teardown needs all of them.
+func (s *Store) ListAllNetworksByOrganization(ctx context.Context, organizationID uuid.UUID) ([]Network, error) {
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`SELECT %s FROM networks WHERE organization_id = $1 ORDER BY id`, networkColumns), organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows, scanNetwork)
+}
+
 func (s *Store) UpdateNetwork(ctx context.Context, input UpdateNetworkInput) (Network, error) {
 	builder := updateBuilder{}
 	if input.Name != nil {
