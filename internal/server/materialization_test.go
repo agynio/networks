@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -460,4 +462,69 @@ type fakeNotificationsClient struct {
 func (f *fakeNotificationsClient) Publish(_ context.Context, request *notificationsv1.PublishRequest, _ ...grpc.CallOption) (*notificationsv1.PublishResponse, error) {
 	f.requests = append(f.requests, request)
 	return &notificationsv1.PublishResponse{}, nil
+}
+
+func TestDeleteOrganizationResourcesRemovesEveryNetwork(t *testing.T) {
+	fakeStore := newFakeStore()
+	authz := &fakeAuthorizationClient{allowed: map[string]bool{}}
+	ziti := &fakeZitiManagementClient{}
+	server := NewWithDependencies(fakeStore, authz, nil, nil, ziti, &fakeNotificationsClient{}, &fakeEventPublisher{})
+	orgID := uuid.New()
+	otherOrgID := uuid.New()
+
+	for i := 0; i < 3; i++ {
+		network := fakeStore.mustCreateNetwork(orgID)
+		resource := fakeStore.mustCreatePrivateResource(network)
+		resource.OpenZitiServiceID = uuid.NewString()
+		fakeStore.resources[resource.Meta.ID] = resource
+	}
+	kept := fakeStore.mustCreateNetwork(otherOrgID)
+
+	// Internal RPC: no caller identity, and no permission granted to any.
+	_, err := server.DeleteOrganizationResources(context.Background(), &networksv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: orgID.String(),
+	})
+	if err != nil {
+		t.Fatalf("DeleteOrganizationResources: %v", err)
+	}
+
+	if len(ziti.deletedServices) != 3 {
+		t.Fatalf("expected 3 OpenZiti services deleted, got %d", len(ziti.deletedServices))
+	}
+	remaining, err := fakeStore.ListAllNetworks(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllNetworks: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].Meta.ID != kept.Meta.ID {
+		t.Fatalf("expected only the other organization's network to survive, got %v", remaining)
+	}
+}
+
+func TestDeleteOrganizationResourcesIsIdempotent(t *testing.T) {
+	fakeStore := newFakeStore()
+	server := NewWithDependencies(fakeStore, &fakeAuthorizationClient{allowed: map[string]bool{}}, nil, nil,
+		&fakeZitiManagementClient{}, &fakeNotificationsClient{}, &fakeEventPublisher{})
+	orgID := uuid.New()
+	fakeStore.mustCreateNetwork(orgID)
+
+	req := &networksv1.DeleteOrganizationResourcesRequest{OrganizationId: orgID.String()}
+	if _, err := server.DeleteOrganizationResources(context.Background(), req); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	// The cascade retries a step it is unsure finished, so the second call has
+	// to succeed on the now-empty organization.
+	if _, err := server.DeleteOrganizationResources(context.Background(), req); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+}
+
+func TestDeleteOrganizationResourcesRejectsInvalidOrganizationID(t *testing.T) {
+	server := NewWithDependencies(newFakeStore(), &fakeAuthorizationClient{allowed: map[string]bool{}}, nil, nil,
+		&fakeZitiManagementClient{}, &fakeNotificationsClient{}, &fakeEventPublisher{})
+	_, err := server.DeleteOrganizationResources(context.Background(), &networksv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: "not-a-uuid",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %v", err)
+	}
 }

@@ -434,6 +434,16 @@ func (f *fakeStore) UpdatePrivateResourceAccessProvisioning(_ context.Context, i
 
 var _ Store = (*fakeStore)(nil)
 
+func (f *fakeStore) ListAllNetworksByOrganization(_ context.Context, organizationID uuid.UUID) ([]store.Network, error) {
+	values := make([]store.Network, 0, len(f.networks))
+	for _, value := range f.networks {
+		if value.OrganizationID == organizationID {
+			values = append(values, value)
+		}
+	}
+	return values, nil
+}
+
 func (f *fakeStore) ListAllNetworks(context.Context) ([]store.Network, error) {
 	values := make([]store.Network, 0, len(f.networks))
 	for _, value := range f.networks {

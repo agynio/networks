@@ -181,3 +181,9 @@ ingress:
 
 metrics:
   enabled: false
+
+internalAuthorizationPolicy:
+  enabled: true
+  serviceAccounts:
+    - name: organizations
+      namespace: ""

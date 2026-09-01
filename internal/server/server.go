@@ -35,6 +35,7 @@ type Store interface {
 	GetNetwork(context.Context, uuid.UUID) (store.Network, error)
 	ListNetworks(context.Context, uuid.UUID, int32, *store.PageCursor) ([]store.Network, *store.PageCursor, error)
 	ListAllNetworks(context.Context) ([]store.Network, error)
+	ListAllNetworksByOrganization(context.Context, uuid.UUID) ([]store.Network, error)
 	UpdateNetwork(context.Context, store.UpdateNetworkInput) (store.Network, error)
 	DeleteNetwork(context.Context, uuid.UUID) error
 	CreateTunnelCredential(context.Context, store.CreateTunnelCredentialInput) (store.TunnelCredential, error)
@@ -254,27 +255,38 @@ func (s *Server) DeleteNetwork(ctx context.Context, request *networksv1.DeleteNe
 	if err := s.requireOrganizationOwner(ctx, network.OrganizationID); err != nil {
 		return nil, err
 	}
+	if err := s.deleteNetwork(ctx, network); err != nil {
+		return nil, err
+	}
+	return &networksv1.DeleteNetworkResponse{}, nil
+}
+
+// deleteNetwork is the delete path itself, without the permission check: the
+// caller has already established that it may. The organization teardown reuses
+// it so a network leaves through the same door however it is removed.
+func (s *Server) deleteNetwork(ctx context.Context, network store.Network) error {
+	id := network.Meta.ID
 	credentials, err := s.store.ListAllTunnelCredentialsFiltered(ctx, store.ListTunnelCredentialsFilter{NetworkID: &id})
 	if err != nil {
-		return nil, toStatus(err)
+		return toStatus(err)
 	}
 	resources, err := s.store.ListAllPrivateResourcesFiltered(ctx, store.ListPrivateResourcesFilterAll{NetworkID: &id})
 	if err != nil {
-		return nil, toStatus(err)
+		return toStatus(err)
 	}
 	accesses, err := s.store.ListAllPrivateResourceAccessFiltered(ctx, store.ListPrivateResourceAccessFilterAll{NetworkID: &id})
 	if err != nil {
-		return nil, toStatus(err)
+		return toStatus(err)
 	}
 	if err := s.deleteNetworkZitiResources(ctx, network, credentials, resources, accesses); err != nil {
-		return nil, status.Errorf(codes.Internal, "delete OpenZiti resources: %v", err)
+		return status.Errorf(codes.Internal, "delete OpenZiti resources: %v", err)
 	}
 	if err := s.store.DeleteNetwork(ctx, id); err != nil {
-		return nil, toStatus(err)
+		return toStatus(err)
 	}
 	for _, access := range accesses {
 		if err := s.publishAccessRevoked(ctx, access); err != nil {
-			return nil, status.Errorf(codes.Internal, "publish access revoked: %v", err)
+			return status.Errorf(codes.Internal, "publish access revoked: %v", err)
 		}
 	}
 	for _, credential := range credentials {
@@ -284,7 +296,7 @@ func (s *Server) DeleteNetwork(ctx context.Context, request *networksv1.DeleteNe
 		s.publishPrivateResourceUpdated(ctx, resource)
 	}
 	s.publishNetworkUpdated(ctx, network)
-	return &networksv1.DeleteNetworkResponse{}, nil
+	return nil
 }
 
 func (s *Server) CreateTunnelCredential(ctx context.Context, request *networksv1.CreateTunnelCredentialRequest) (*networksv1.CreateTunnelCredentialResponse, error) {
@@ -1417,4 +1429,32 @@ func toStatus(err error) error {
 		return status.Error(codes.AlreadyExists, alreadyExists.Error())
 	}
 	return status.Error(codes.Internal, err.Error())
+}
+
+// DeleteOrganizationResources removes the organization's networks, and with
+// each one its tunnel credentials, private resources, access grants, and the
+// OpenZiti objects behind them. It is internal: Istio settles who may call it,
+// so there is no permission check and no caller identity to check against.
+// Step 5 of the organization teardown, after the agents whose grants named
+// these resources.
+//
+// Everything under a network cascades from its row, so the per-network delete
+// path covers the whole subtree; the teardown only has to walk the networks.
+//
+// Idempotent by construction: a retried step lists nothing and deletes nothing.
+func (s *Server) DeleteOrganizationResources(ctx context.Context, request *networksv1.DeleteOrganizationResourcesRequest) (*networksv1.DeleteOrganizationResourcesResponse, error) {
+	organizationID, err := parseUUIDField("organization_id", request.GetOrganizationId())
+	if err != nil {
+		return nil, err
+	}
+	networks, err := s.store.ListAllNetworksByOrganization(ctx, organizationID)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	for _, network := range networks {
+		if err := s.deleteNetwork(ctx, network); err != nil {
+			return nil, err
+		}
+	}
+	return &networksv1.DeleteOrganizationResourcesResponse{}, nil
 }
